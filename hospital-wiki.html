@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>院内ルール管理システム</title>
+<style>
+  :root {
+    --primary: #0f4c75;
+    --primary-dark: #0a3650;
+    --primary-light: #3282b8;
+    --accent: #bbe1fa;
+    --sidebar-bg: #f8f9fa;
+    --border: #e2e6ea;
+    --text: #1f2a36;
+    --text-muted: #6b7785;
+    --bg: #ffffff;
+    --hover: #eef3f7;
+    --active: #e1edf5;
+    --shadow: 0 1px 3px rgba(15,76,117,.08), 0 1px 2px rgba(15,76,117,.06);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  /* Header */
+  header {
+    position: fixed; top: 0; left: 0; right: 0; height: 60px; z-index: 100;
+    background: var(--primary);
+    color: #fff;
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  }
+  .hamburger {
+    display: none; background: none; border: none; color: #fff; font-size: 22px; cursor: pointer; padding: 4px 8px;
+  }
+  .brand { font-size: 18px; font-weight: 700; white-space: nowrap; display: flex; align-items: center; gap: 8px; }
+  .brand .logo { font-size: 22px; }
+  .header-search { flex: 1; max-width: 420px; margin: 0 auto; position: relative; }
+  .header-search input {
+    width: 100%; padding: 9px 14px 9px 38px; border-radius: 20px; border: none;
+    font-size: 14px; background: rgba(255,255,255,.95); color: var(--text);
+  }
+  .header-search input:focus { outline: 2px solid var(--accent); }
+  .header-search .search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 14px; }
+  .user-area { display: flex; align-items: center; gap: 8px; font-size: 14px; white-space: nowrap; }
+  .user-avatar { width: 32px; height: 32px; border-radius: 50%; background: var(--primary-light); display: flex; align-items: center; justify-content: center; font-weight: 600; }
+
+  /* Layout */
+  .layout { display: flex; padding-top: 60px; min-height: 100vh; }
+
+  /* Sidebar */
+  .sidebar {
+    position: fixed; top: 60px; bottom: 0; left: 0; width: 260px;
+    background: var(--sidebar-bg); border-right: 1px solid var(--border);
+    overflow-y: auto; padding: 16px 0; z-index: 90;
+    transition: transform .25s ease;
+  }
+  .sidebar-overlay { display: none; }
+  .nav-item-home {
+    display: flex; align-items: center; gap: 10px; padding: 10px 20px; margin: 0 8px 8px;
+    cursor: pointer; border-radius: 8px; font-weight: 600; color: var(--primary);
+  }
+  .nav-item-home:hover { background: var(--hover); }
+  .nav-item-home.active { background: var(--active); }
+  .nav-section { margin-bottom: 6px; }
+  .nav-section-header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 20px; cursor: pointer;
+    font-size: 13px; font-weight: 700; color: var(--text-muted); text-transform: none;
+    letter-spacing: .02em; user-select: none;
+  }
+  .nav-section-header:hover { color: var(--primary); }
+  .nav-section-header .chev { margin-left: auto; transition: transform .2s; font-size: 11px; }
+  .nav-section.collapsed .chev { transform: rotate(-90deg); }
+  .nav-section.collapsed .nav-list { display: none; }
+  .nav-section-header .add-btn {
+    background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 15px;
+    padding: 2px 6px; border-radius: 6px; line-height: 1;
+  }
+  .nav-section-header .add-btn:hover { background: var(--accent); color: var(--primary); }
+  .nav-list { list-style: none; }
+  .nav-list li {
+    display: flex; align-items: center; gap: 10px; padding: 8px 20px 8px 30px; margin: 0 8px;
+    cursor: pointer; border-radius: 8px; font-size: 14px; color: var(--text);
+    transition: background .12s;
+  }
+  .nav-list li:hover { background: var(--hover); }
+  .nav-list li.active { background: var(--active); color: var(--primary); font-weight: 600; }
+  .nav-list li .icon { font-size: 15px; }
+  .nav-list li.hidden, .nav-section.hidden { display: none; }
+  .nav-list li mark, .nav-section-header mark { background: #fff3a0; border-radius: 3px; padding: 0 2px; }
+
+  /* Content */
+  .content {
+    margin-left: 260px; flex: 1; padding: 32px 40px 80px; min-width: 0;
+  }
+  .content-inner { max-width: 820px; margin: 0 auto; }
+
+  /* Page header */
+  .page-head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+  .page-title { font-size: 26px; font-weight: 700; color: var(--primary); flex: 1; }
+  .page-meta { color: var(--text-muted); font-size: 13px; margin-bottom: 24px; display: flex; align-items: center; gap: 6px; }
+  .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px;
+    border: 1px solid var(--border); background: #fff; color: var(--text); cursor: pointer;
+    font-size: 14px; font-family: inherit; transition: all .15s; white-space: nowrap;
+  }
+  .btn:hover { background: var(--hover); border-color: var(--primary-light); }
+  .btn-primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .btn-primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+  .btn-danger:hover { background: #fdecec; border-color: #e57373; color: #c62828; }
+
+  /* Rendered markdown */
+  .doc h1 { font-size: 24px; color: var(--primary); margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 2px solid var(--accent); }
+  .doc h2 { font-size: 19px; color: var(--primary-dark); margin: 22px 0 10px; }
+  .doc h3 { font-size: 16px; color: var(--text); margin: 18px 0 8px; }
+  .doc p { margin: 10px 0; }
+  .doc ul { margin: 10px 0 10px 8px; padding-left: 22px; }
+  .doc li { margin: 5px 0; }
+  .doc strong { color: var(--primary-dark); }
+  .doc hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+  .doc mark { background: #fff3a0; padding: 0 2px; border-radius: 3px; }
+  .doc-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 28px 32px; box-shadow: var(--shadow); }
+
+  /* Editor */
+  .editor-toolbar { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+  .editor-toolbar .btn { padding: 6px 12px; font-size: 13px; }
+  textarea.editor {
+    width: 100%; min-height: 440px; padding: 18px 20px; border: 1px solid var(--border);
+    border-radius: 12px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 14px;
+    line-height: 1.7; resize: vertical; color: var(--text); box-shadow: var(--shadow);
+  }
+  textarea.editor:focus { outline: none; border-color: var(--primary-light); box-shadow: 0 0 0 3px var(--accent); }
+  .editor-hint { color: var(--text-muted); font-size: 12px; margin-top: 8px; }
+
+  /* Home / overview cards */
+  .home-title { font-size: 28px; font-weight: 700; color: var(--primary); margin-bottom: 6px; }
+  .home-sub { color: var(--text-muted); margin-bottom: 28px; }
+  .group-label { font-size: 14px; font-weight: 700; color: var(--text-muted); margin: 28px 0 12px; display: flex; align-items: center; gap: 8px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px,1fr)); gap: 14px; }
+  .card {
+    background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 18px;
+    cursor: pointer; transition: all .18s; box-shadow: var(--shadow);
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--primary-light); box-shadow: 0 6px 16px rgba(15,76,117,.12); }
+  .card .card-icon { font-size: 26px; margin-bottom: 8px; }
+  .card .card-name { font-size: 16px; font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+  .card .card-date { font-size: 12px; color: var(--text-muted); }
+
+  .empty { text-align: center; color: var(--text-muted); padding: 60px 20px; }
+
+  /* Responsive */
+  @media (max-width: 860px) {
+    .hamburger { display: block; }
+    .user-area .uname { display: none; }
+    .sidebar { transform: translateX(-100%); box-shadow: 4px 0 16px rgba(0,0,0,.12); }
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-overlay.show { display: block; position: fixed; inset: 60px 0 0 0; background: rgba(0,0,0,.35); z-index: 85; }
+    .content { margin-left: 0; padding: 24px 18px 80px; }
+    .brand .full { display: none; }
+  }
+
+  /* Print */
+  @media print {
+    header, .sidebar, .page-actions, .editor-toolbar, .sidebar-overlay { display: none !important; }
+    .content { margin: 0; padding: 0; }
+    .layout { padding-top: 0; }
+    .doc-card { border: none; box-shadow: none; padding: 0; }
+    body { font-size: 12pt; }
+    .page-title { color: #000; }
+    .doc h1, .doc h2, .doc h3 { color: #000; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <button class="hamburger" id="hamburger" aria-label="メニュー">☰</button>
+  <div class="brand"><span class="logo">🏥</span><span class="full">院内ルール管理システム</span></div>
+  <div class="header-search">
+    <span class="search-icon">🔍</span>
+    <input type="text" id="search" placeholder="ルール・カテゴリを検索...">
+  </div>
+  <div class="user-area">
+    <div class="user-avatar">院</div>
+    <span class="uname">スタッフ</span>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar">
+    <div class="nav-item-home" id="navHome" onclick="goHome()"><span>🏠</span><span>ホーム</span></div>
+    <div id="navSections"></div>
+  </nav>
+  <div class="sidebar-overlay" id="overlay" onclick="closeSidebar()"></div>
+
+  <main class="content">
+    <div class="content-inner" id="main"></div>
+  </main>
+</div>
+
+<script>
+const STORAGE_KEY = "hospital-wiki-data";
+
+const DEFAULTS = {
+  sections: [
+    {
+      id: "job", title: "職種別", icon: "👤", collapsed: false,
+      items: [
+        { id: "nurse", name: "看護師", icon: "💉" },
+        { id: "psw", name: "精神保健福祉士", icon: "🤝" },
+        { id: "ot", name: "作業療法士", icon: "🧩" },
+        { id: "clerk", name: "事務員", icon: "🗂️" },
+        { id: "visitteam", name: "訪問看護チーム", icon: "🚗" }
+      ]
+    },
+    {
+      id: "group", title: "職種連携グループ", icon: "👥", collapsed: false,
+      items: [
+        { id: "daycare", name: "デイケア業務", icon: "☀️" },
+        { id: "elderday", name: "高齢者デイケア", icon: "👴" },
+        { id: "wardot", name: "病棟作業療法", icon: "🛏️" },
+        { id: "discharge", name: "入退院支援", icon: "🔄" },
+        { id: "homevisit", name: "訪問看護", icon: "🏠" }
+      ]
+    }
+  ],
+  pages: {}
+};
+
+const SAMPLE = {
+  nurse: `# 看護師業務ルール
+
+## 申し送り
+- 申し送りは日勤・夜勤の交代時に必ず実施する
+- SBAR形式で記録・報告を行う
+- 重要事項は必ず複数名で確認する
+
+## 記録
+- 電子カルテへの入力は当日中に完了すること
+- 観察内容は客観的事実を記録する
+
+## 服薬管理
+- 与薬前には必ず患者確認（フルネーム＋生年月日）を行う
+- ダブルチェックを徹底する`,
+
+  psw: `# 精神保健福祉士業務ルール
+
+## 相談業務
+- 初回相談は記録票に必ず記入する
+- 個人情報は厳重に管理し、目的外利用を禁止する
+- 関係機関との連携は本人同意を前提とする
+
+## 退院支援
+- 退院後の生活環境を多職種で評価する
+- 社会資源（福祉サービス）の情報提供を行う
+
+## 記録・報告
+- ケース記録は当日中に作成する
+- カンファレンス内容を共有フォルダに保存する`,
+
+  ot: `# 作業療法士業務ルール
+
+## 評価
+- 初回評価は2週間以内に完了する
+- ADL・IADLを標準評価で記録する
+
+## 訓練実施
+- 個別プログラムは月次で見直す
+- リスク管理を徹底し転倒予防に努める
+
+## 記録
+- 実施内容と反応をその日のうちに記録する
+- 目標達成度を定期的に評価・報告する`,
+
+  clerk: `# 事務員業務ルール
+
+## 受付対応
+- 来院者には丁寧な応対を心がける
+- 保険証は毎月確認する
+
+## 会計
+- レセプト請求は締切を厳守する
+- 釣銭の管理は二名以上で確認する
+
+## 文書管理
+- 個人情報を含む書類は施錠保管する
+- 文書の保存年限を遵守する`,
+
+  visitteam: `# 訪問看護チーム業務ルール
+
+## 訪問前準備
+- 訪問計画とルートを前日までに確認する
+- 必要物品・記録端末の充電を確認する
+
+## 訪問時
+- 利用者宅では身分証を提示する
+- バイタル測定結果を即時記録する
+- 急変時は主治医・ステーションへ連絡する
+
+## 報告
+- 訪問記録は当日中に提出する
+- ケアマネジャーへ月次報告を行う`,
+
+  daycare: `# デイケア業務ルール
+
+## 開始前準備
+- 利用者名簿の確認（当日の出席予定者）
+- 活動スペースの環境整備
+- 送迎車の点検記録
+
+## プログラム実施
+- 活動内容は週次で記録・報告
+- 利用者の体調変化は即時報告
+- 緊急時対応フローに従う
+
+## 記録・報告
+- デイケア日誌を当日中に記入
+- インシデントは当日中に報告書提出`,
+
+  elderday: `# 高齢者デイケア業務ルール
+
+## 送迎
+- 乗降時は転倒防止を最優先とする
+- 送迎名簿で人数を必ず確認する
+
+## 体調管理
+- 来所時にバイタルチェックを実施する
+- 水分補給を定期的に促す
+
+## プログラム
+- 機能訓練は個別計画に基づき実施する
+- レクリエーションは安全に配慮して行う
+
+## 記録
+- 連絡帳に当日の様子を記入する
+- 家族への申し送りを徹底する`,
+
+  wardot: `# 病棟作業療法業務ルール
+
+## 病棟連携
+- 看護師と当日の体調情報を共有する
+- 介入前にカルテで最新状態を確認する
+
+## 実施
+- ベッドサイドでの安全確保を徹底する
+- ライン・ドレーン類に注意して介助する
+
+## 記録
+- 実施内容を電子カルテに当日記録する
+- リスク事項は多職種カンファレンスで共有する`,
+
+  discharge: `# 入退院支援業務ルール
+
+## 入院時
+- 入院72時間以内にスクリーニングを実施する
+- 退院困難要因をアセスメントする
+
+## 支援計画
+- 多職種で退院支援計画を作成する
+- 本人・家族の意向を確認・記録する
+
+## 退院調整
+- 地域の関係機関と連携する
+- 退院前カンファレンスを必要に応じて開催する
+
+## 記録
+- 支援経過を所定の様式に記録する`,
+
+  homevisit: `# 訪問看護業務ルール
+
+## 計画
+- 訪問看護計画書を主治医指示に基づき作成する
+- 月次で計画を評価・更新する
+
+## 訪問時
+- 感染対策（手指衛生・防護具）を徹底する
+- 服薬状況・療養環境を確認する
+
+## 緊急対応
+- 24時間連絡体制を周知する
+- 急変時は主治医へ速やかに報告する
+
+## 記録
+- 訪問看護記録書を当日中に作成する`
+};
+
+let data;
+let current = "home"; // "home" or pageId
+let editing = false;
+let searchTerm = "";
+
+function nowStamp() { return Date.now(); }
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) { data = JSON.parse(raw); return; }
+  } catch (e) {}
+  // seed
+  data = JSON.parse(JSON.stringify(DEFAULTS));
+  data.sections.forEach(sec => sec.items.forEach(it => {
+    data.pages[it.id] = { content: SAMPLE[it.id] || ("# " + it.name + "\n\n（内容を編集してください）"), updated: nowStamp() };
+  }));
+  save();
+}
+function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+
+function findItem(id) {
+  for (const sec of data.sections) {
+    const it = sec.items.find(i => i.id === id);
+    if (it) return { item: it, section: sec };
+  }
+  return null;
+}
+
+function fmtDate(ts) {
+  const d = new Date(ts);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}年${p(d.getMonth()+1)}月${p(d.getDate())}日 ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function highlight(html, term) {
+  if (!term) return html;
+  const re = new RegExp("(" + term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
+  // operate only outside tags
+  return html.replace(/>([^<]+)</g, (m, txt) => ">" + txt.replace(re, "<mark>$1</mark>") + "<");
+}
+
+// Simple markdown renderer
+function renderMarkdown(md) {
+  const lines = md.split(/\r?\n/);
+  let html = "", inList = false;
+  const inline = t => escapeHtml(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  for (let raw of lines) {
+    const line = raw.replace(/\s+$/,"");
+    if (/^###\s+/.test(line)) { closeList(); html += "<h3>" + inline(line.replace(/^###\s+/,"")) + "</h3>"; }
+    else if (/^##\s+/.test(line)) { closeList(); html += "<h2>" + inline(line.replace(/^##\s+/,"")) + "</h2>"; }
+    else if (/^#\s+/.test(line)) { closeList(); html += "<h1>" + inline(line.replace(/^#\s+/,"")) + "</h1>"; }
+    else if (/^---+$/.test(line)) { closeList(); html += "<hr>"; }
+    else if (/^[-*]\s+/.test(line)) { if (!inList) { html += "<ul>"; inList = true; } html += "<li>" + inline(line.replace(/^[-*]\s+/,"")) + "</li>"; }
+    else if (line.trim() === "") { closeList(); }
+    else { closeList(); html += "<p>" + inline(line) + "</p>"; }
+  }
+  closeList();
+  return html;
+}
+
+/* ---------- Sidebar ---------- */
+function renderSidebar() {
+  const wrap = document.getElementById("navSections");
+  wrap.innerHTML = "";
+  const term = searchTerm.toLowerCase();
+  data.sections.forEach(sec => {
+    const section = document.createElement("div");
+    section.className = "nav-section" + (sec.collapsed ? " collapsed" : "");
+
+    const titleHtml = term ? highlight(escapeHtml(sec.title), searchTerm) : escapeHtml(sec.title);
+    const header = document.createElement("div");
+    header.className = "nav-section-header";
+    header.innerHTML = `<span>${sec.icon}</span><span>${titleHtml}</span>
+      <span class="chev">▼</span>
+      <button class="add-btn" title="追加" onclick="event.stopPropagation();addItem('${sec.id}')">➕</button>`;
+    header.querySelector("span").parentElement;
+    header.addEventListener("click", () => { sec.collapsed = !sec.collapsed; save(); renderSidebar(); });
+
+    const ul = document.createElement("ul");
+    ul.className = "nav-list";
+    let anyVisible = false;
+    sec.items.forEach(it => {
+      const li = document.createElement("li");
+      const match = !term || it.name.toLowerCase().includes(term);
+      if (!match) li.className = "hidden"; else anyVisible = true;
+      if (it.id === current) li.classList.add("active");
+      const nameHtml = term ? highlight(escapeHtml(it.name), searchTerm) : escapeHtml(it.name);
+      li.innerHTML = `<span class="icon">${it.icon}</span><span>${nameHtml}</span>`;
+      li.onclick = () => openPage(it.id);
+      ul.appendChild(li);
+    });
+    section.appendChild(header);
+    section.appendChild(ul);
+    if (term && !anyVisible && !sec.title.toLowerCase().includes(term)) section.classList.add("hidden");
+    wrap.appendChild(section);
+  });
+  document.getElementById("navHome").classList.toggle("active", current === "home");
+}
+
+/* ---------- Views ---------- */
+function goHome() { current = "home"; editing = false; render(); closeSidebar(); }
+function openPage(id) { current = id; editing = false; render(); closeSidebar(); }
+
+function render() {
+  renderSidebar();
+  const main = document.getElementById("main");
+  if (current === "home") { main.innerHTML = renderHome(); return; }
+  const found = findItem(current);
+  if (!found) { goHome(); return; }
+  if (editing) main.innerHTML = renderEditor(found);
+  else main.innerHTML = renderPage(found);
+  if (editing) {
+    const ta = document.getElementById("editorArea");
+    ta.focus();
+  }
+}
+
+function renderHome() {
+  let html = `<div class="home-title">🏥 院内ルール管理システム</div>
+    <div class="home-sub">各カテゴリの最新ルール・業務手順を確認・編集できます。常に最新版が表示されます。</div>`;
+  data.sections.forEach(sec => {
+    html += `<div class="group-label">${sec.icon} ${escapeHtml(sec.title)}</div><div class="card-grid">`;
+    sec.items.forEach(it => {
+      const p = data.pages[it.id];
+      const date = p ? "最終更新: " + fmtDate(p.updated) : "未作成";
+      html += `<div class="card" onclick="openPage('${it.id}')">
+        <div class="card-icon">${it.icon}</div>
+        <div class="card-name">${escapeHtml(it.name)}</div>
+        <div class="card-date">${date}</div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+  return html;
+}
+
+function renderPage(found) {
+  const { item } = found;
+  const p = data.pages[item.id] || { content: "", updated: Date.now() };
+  let body = renderMarkdown(p.content);
+  if (searchTerm) body = highlight(body, searchTerm);
+  return `
+    <div class="page-head">
+      <div class="page-title">${item.icon} ${escapeHtml(item.name)}</div>
+      <div class="page-actions">
+        <button class="btn btn-primary" onclick="startEdit()">✏️ 編集</button>
+        <button class="btn" onclick="window.print()">🖨️ 印刷</button>
+        <button class="btn btn-danger" onclick="deleteItem('${item.id}')">🗑️ 削除</button>
+      </div>
+    </div>
+    <div class="page-meta">🕒 最終更新: ${fmtDate(p.updated)}</div>
+    <div class="doc doc-card">${body}</div>`;
+}
+
+function renderEditor(found) {
+  const { item } = found;
+  const p = data.pages[item.id] || { content: "" };
+  return `
+    <div class="page-head">
+      <div class="page-title">✏️ ${escapeHtml(item.name)} を編集</div>
+      <div class="page-actions">
+        <button class="btn btn-primary" onclick="saveEdit()">💾 保存</button>
+        <button class="btn" onclick="cancelEdit()">✖️ キャンセル</button>
+      </div>
+    </div>
+    <div class="editor-toolbar">
+      <button class="btn" onclick="mdInsert('heading')">H 見出し</button>
+      <button class="btn" onclick="mdInsert('sub')">H2 小見出し</button>
+      <button class="btn" onclick="mdInsert('bold')"><b>B</b> 太字</button>
+      <button class="btn" onclick="mdInsert('list')">• リスト</button>
+      <button class="btn" onclick="mdInsert('hr')">― 区切り</button>
+    </div>
+    <textarea class="editor" id="editorArea" spellcheck="false">${escapeHtml(p.content)}</textarea>
+    <div class="editor-hint">記法: # 見出し / ## 小見出し / ### 小々見出し / - 箇条書き / **太字** ／ Ctrl+S で保存</div>`;
+}
+
+/* ---------- Editing actions ---------- */
+function startEdit() { editing = true; render(); }
+function cancelEdit() { editing = false; render(); }
+function saveEdit() {
+  const ta = document.getElementById("editorArea");
+  if (!ta) return;
+  data.pages[current] = { content: ta.value, updated: nowStamp() };
+  save();
+  editing = false;
+  render();
+}
+
+function mdInsert(type) {
+  const ta = document.getElementById("editorArea");
+  if (!ta) return;
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const sel = ta.value.slice(s, e);
+  let text, cursorOffset = 0;
+  if (type === "bold") { text = "**" + (sel || "太字") + "**"; }
+  else if (type === "heading") { text = "# " + (sel || "見出し"); }
+  else if (type === "sub") { text = "## " + (sel || "小見出し"); }
+  else if (type === "list") { text = (sel || "項目").split("\n").map(l => "- " + l).join("\n"); }
+  else if (type === "hr") { text = "\n---\n"; }
+  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = s + text.length;
+}
+
+/* ---------- Add / delete categories ---------- */
+function addItem(sectionId) {
+  const sec = data.sections.find(s => s.id === sectionId);
+  if (!sec) return;
+  const name = prompt(`「${sec.title}」に新しいカテゴリを追加\nカテゴリ名を入力してください:`);
+  if (!name || !name.trim()) return;
+  const id = "c" + Date.now();
+  sec.items.push({ id, name: name.trim(), icon: "📄" });
+  data.pages[id] = { content: "# " + name.trim() + "\n\n（内容を編集してください）", updated: nowStamp() };
+  sec.collapsed = false;
+  save();
+  openPage(id);
+}
+
+function deleteItem(id) {
+  const found = findItem(id);
+  if (!found) return;
+  if (!confirm(`「${found.item.name}」を削除しますか？この操作は取り消せません。`)) return;
+  found.section.items = found.section.items.filter(i => i.id !== id);
+  delete data.pages[id];
+  save();
+  goHome();
+}
+
+/* ---------- Search ---------- */
+document.getElementById("search").addEventListener("input", e => {
+  searchTerm = e.target.value.trim();
+  render();
+});
+
+/* ---------- Keyboard ---------- */
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+    if (editing) { e.preventDefault(); saveEdit(); }
+  }
+});
+
+/* ---------- Mobile sidebar ---------- */
+function openSidebar() { document.getElementById("sidebar").classList.add("open"); document.getElementById("overlay").classList.add("show"); }
+function closeSidebar() { document.getElementById("sidebar").classList.remove("open"); document.getElementById("overlay").classList.remove("show"); }
+document.getElementById("hamburger").addEventListener("click", () => {
+  const sb = document.getElementById("sidebar");
+  if (sb.classList.contains("open")) closeSidebar(); else openSidebar();
+});
+
+/* ---------- Init ---------- */
+load();
+render();
+</script>
+</body>
+</html>
