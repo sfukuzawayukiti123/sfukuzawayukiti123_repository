@@ -1,0 +1,1812 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ドラゴンクエスト II 風 ブラウザゲーム</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; background:#000; overflow:hidden; font-family:"MS Gothic","Hiragino Kaku Gothic ProN",monospace; }
+  #wrap{ position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:#000; }
+  #game{ image-rendering:pixelated; background:#000; touch-action:none; max-width:100vw; max-height:78vh; }
+  /* DQ style window border drawn via canvas; this is just shell */
+  #pad{ width:100%; max-width:520px; display:flex; justify-content:space-between; align-items:center;
+        padding:10px 16px; gap:8px; user-select:none; }
+  .dpad{ display:grid; grid-template-columns:repeat(3,46px); grid-template-rows:repeat(3,46px); gap:3px; }
+  .dpad button, .btns button{
+    background:#1a2a55; color:#fff; border:2px solid #88aaff; border-radius:8px;
+    font-size:20px; font-weight:bold; touch-action:manipulation; }
+  .dpad button:active, .btns button:active{ background:#3a5ab0; }
+  .dpad .blank{ background:transparent; border:none; }
+  .btns{ display:flex; flex-direction:column; gap:10px; }
+  .btns button{ width:70px; height:70px; border-radius:50%; font-size:22px; }
+  #hint{ color:#7788bb; font-size:12px; margin-top:4px; text-align:center; }
+  @media (min-width:760px){ #pad{ opacity:0.55; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="512" height="448"></canvas>
+  <div id="pad">
+    <div class="dpad">
+      <button class="blank"></button>
+      <button data-k="ArrowUp">▲</button>
+      <button class="blank"></button>
+      <button data-k="ArrowLeft">◀</button>
+      <button class="blank"></button>
+      <button data-k="ArrowRight">▶</button>
+      <button class="blank"></button>
+      <button data-k="ArrowDown">▼</button>
+      <button class="blank"></button>
+    </div>
+    <div class="btns">
+      <button data-k="z">Z</button>
+      <button data-k="x">X</button>
+    </div>
+  </div>
+  <div id="hint">移動:矢印キー / 決定:Z / メニュー・キャンセル:X</div>
+</div>
+<script>
+"use strict";
+/* ============================================================
+   DRAGON QUEST II 風 — Single-file browser RPG
+   ============================================================ */
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const TILE = 32;            // rendered tile size
+const VW = cv.width, VH = cv.height;
+const COLS = VW / TILE, ROWS = VH / TILE; // 16 x 14 visible
+
+/* ---------- Input ---------- */
+const keys = {};
+const pressed = {}; // edge-triggered
+function setKey(k,v){
+  if(v && !keys[k]) pressed[k]=true;
+  keys[k]=v;
+}
+window.addEventListener('keydown',e=>{
+  const map={ArrowUp:'ArrowUp',ArrowDown:'ArrowDown',ArrowLeft:'ArrowLeft',ArrowRight:'ArrowRight'};
+  let k=e.key;
+  if(k===' ')k='z';
+  if(k==='Enter')k='z';
+  if(k==='Escape')k='x';
+  k=k.length===1?k.toLowerCase():k;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','z','x'].includes(k)){ e.preventDefault(); setKey(k,true); }
+});
+window.addEventListener('keyup',e=>{
+  let k=e.key; if(k===' ')k='z'; if(k==='Enter')k='z'; if(k==='Escape')k='x';
+  k=k.length===1?k.toLowerCase():k; setKey(k,false);
+});
+document.querySelectorAll('#pad button[data-k]').forEach(b=>{
+  const k=b.dataset.k;
+  const dn=e=>{e.preventDefault();setKey(k,true);};
+  const up=e=>{e.preventDefault();setKey(k,false);};
+  b.addEventListener('touchstart',dn,{passive:false});
+  b.addEventListener('touchend',up,{passive:false});
+  b.addEventListener('mousedown',dn);
+  b.addEventListener('mouseup',up);
+  b.addEventListener('mouseleave',up);
+});
+function consume(k){ if(pressed[k]){ pressed[k]=false; return true; } return false; }
+function clearPressed(){ for(const k in pressed) pressed[k]=false; }
+
+/* ---------- Utility ---------- */
+const rnd=n=>Math.floor(Math.random()*n);
+const rng=(a,b)=>a+rnd(b-a+1);
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+/* ---------- Pixel font (Katakana/Hiragana via canvas fillText) ---------- */
+function drawText(s,x,y,color,size){
+  ctx.fillStyle=color||'#fff';
+  ctx.font=(size||16)+'px "MS Gothic","Hiragino Kaku Gothic ProN",monospace';
+  ctx.textBaseline='top';
+  ctx.fillText(s,x,y);
+}
+function drawTextC(s,cx,y,color,size){
+  ctx.font=(size||16)+'px "MS Gothic","Hiragino Kaku Gothic ProN",monospace';
+  const w=ctx.measureText(s).width;
+  drawText(s,cx-w/2,y,color,size);
+}
+
+/* ---------- DQ Window (golden border) ---------- */
+function drawWindow(x,y,w,h){
+  ctx.fillStyle='#000';
+  ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle='#fff';
+  ctx.lineWidth=4;
+  ctx.strokeRect(x+2,y+2,w-4,h-4);
+  ctx.strokeStyle='#f8d448';
+  ctx.lineWidth=2;
+  ctx.strokeRect(x+5,y+5,w-10,h-10);
+}
+
+/* ============================================================
+   TILE DEFINITIONS & MAP DRAWING
+   ============================================================ */
+// tile codes
+const T={
+  GRASS:0, TREE:1, WATER:2, MOUNTAIN:3, TOWN:4, CASTLE:5, CAVE:6,
+  FLOOR:7, WALL:8, BRIDGE:9, SAND:10, ROOF:11, DOOR:12, STAIRS_DN:13,
+  STAIRS_UP:14, CHEST:15, SHOP:16, INN:17, NPC:18, KING:19, PATH:20,
+  LAVA:21, BOSS:22, EXIT:23, FLOWER:24
+};
+const SOLID = new Set([T.TREE,T.WATER,T.MOUNTAIN,T.WALL,T.LAVA]);
+
+function tileColor(t){
+  switch(t){
+    case T.GRASS:return '#1f7a34';
+    case T.PATH:return '#caa15a';
+    case T.SAND:return '#d6c178';
+    case T.FLOOR:return '#3a3a4a';
+    case T.BRIDGE:return '#8a5a30';
+    default:return '#1f7a34';
+  }
+}
+function drawTile(t,px,py){
+  // base
+  ctx.fillStyle=tileColor(t===T.TREE||t===T.FLOWER?T.GRASS:(t===T.WALL?T.FLOOR:t));
+  if([T.WATER,T.MOUNTAIN,T.TOWN,T.CASTLE,T.CAVE,T.DOOR,T.STAIRS_DN,T.STAIRS_UP,T.CHEST,T.SHOP,T.INN,T.NPC,T.KING,T.ROOF,T.LAVA,T.BOSS,T.EXIT].includes(t)){
+    ctx.fillStyle=(t===T.FLOOR||t===T.WALL)?'#3a3a4a':'#1f7a34';
+  }
+  ctx.fillRect(px,py,TILE,TILE);
+  const s=TILE;
+  switch(t){
+    case T.GRASS:
+      ctx.fillStyle='#2a9544';
+      ctx.fillRect(px+6,py+8,3,3); ctx.fillRect(px+20,py+18,3,3);
+      break;
+    case T.FLOWER:
+      ctx.fillStyle='#2a9544';
+      ctx.fillRect(px+6,py+8,3,3);
+      ctx.fillStyle='#ff5577'; ctx.fillRect(px+18,py+14,5,5);
+      ctx.fillStyle='#ffe066'; ctx.fillRect(px+20,py+16,1,1);
+      break;
+    case T.TREE:
+      ctx.fillStyle='#0c5a20';
+      ctx.fillRect(px+6,py+4,20,18);
+      ctx.fillStyle='#138a32'; ctx.fillRect(px+10,py+8,12,8);
+      ctx.fillStyle='#5a3a18'; ctx.fillRect(px+13,py+22,6,8);
+      break;
+    case T.WATER:
+      ctx.fillStyle='#1b3aa0'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#3a6ad0';
+      const wob=Math.sin(animClock/250+px*0.3)*2;
+      ctx.fillRect(px+4,py+10+wob,10,2); ctx.fillRect(px+18,py+20-wob,8,2);
+      break;
+    case T.MOUNTAIN:
+      ctx.fillStyle='#6b5230'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#8a6e40'; ctx.beginPath();
+      ctx.moveTo(px+16,py+4); ctx.lineTo(px+30,py+28); ctx.lineTo(px+2,py+28); ctx.fill();
+      ctx.fillStyle='#e8e8f0'; ctx.beginPath();
+      ctx.moveTo(px+16,py+4); ctx.lineTo(px+22,py+14); ctx.lineTo(px+10,py+14); ctx.fill();
+      break;
+    case T.SAND:
+      ctx.fillStyle='#c8b066'; ctx.fillRect(px+8,py+10,3,2); ctx.fillRect(px+20,py+20,3,2);
+      break;
+    case T.BRIDGE:
+      ctx.fillStyle='#1b3aa0'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#8a5a30'; ctx.fillRect(px,py+8,s,16);
+      ctx.fillStyle='#6a3e1c'; ctx.fillRect(px,py+8,s,2); ctx.fillRect(px,py+22,s,2);
+      break;
+    case T.TOWN:
+      ctx.fillStyle='#1f7a34'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#c44'; ctx.fillRect(px+5,py+4,22,8);
+      ctx.fillStyle='#ddd'; ctx.fillRect(px+5,py+12,22,16);
+      ctx.fillStyle='#5a3a18'; ctx.fillRect(px+13,py+18,6,10);
+      ctx.fillStyle='#88ccff'; ctx.fillRect(px+8,py+15,4,4); ctx.fillRect(px+20,py+15,4,4);
+      break;
+    case T.CASTLE:
+      ctx.fillStyle='#1f7a34'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#bbb'; ctx.fillRect(px+4,py+8,24,20);
+      ctx.fillStyle='#999';
+      ctx.fillRect(px+4,py+4,5,6); ctx.fillRect(px+14,py+2,5,8); ctx.fillRect(px+23,py+4,5,6);
+      ctx.fillStyle='#222'; ctx.fillRect(px+13,py+18,6,10);
+      ctx.fillStyle='#ffd34d'; ctx.fillRect(px+15,py+3,2,3);
+      break;
+    case T.CAVE:
+      ctx.fillStyle='#6b5230'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#000'; ctx.beginPath();
+      ctx.ellipse(px+16,py+20,9,11,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#4a3820'; ctx.fillRect(px+2,py+2,s-4,4);
+      break;
+    case T.FLOOR:
+      ctx.fillStyle='#444458'; ctx.fillRect(px+1,py+1,s-2,s-2);
+      ctx.fillStyle='#3a3a4a'; ctx.fillRect(px,py,s,1); ctx.fillRect(px,py,1,s);
+      break;
+    case T.WALL:
+      ctx.fillStyle='#2a2a38'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#555'; ctx.fillRect(px+2,py+2,12,12); ctx.fillRect(px+18,py+2,12,12);
+      ctx.fillRect(px+2,py+18,12,12); ctx.fillRect(px+18,py+18,12,12);
+      break;
+    case T.DOOR:
+      ctx.fillStyle='#2a2a38'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#c89028'; ctx.fillRect(px+8,py+4,16,26);
+      ctx.fillStyle='#000'; ctx.fillRect(px+19,py+16,3,3);
+      break;
+    case T.ROOF:
+      ctx.fillStyle='#7a2222'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#933'; ctx.fillRect(px,py+4,s,4); ctx.fillRect(px,py+14,s,4); ctx.fillRect(px,py+24,s,4);
+      break;
+    case T.STAIRS_DN:
+      ctx.fillStyle='#3a3a4a'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#888'; ctx.fillRect(px+4,py+4,24,6); ctx.fillRect(px+8,py+12,20,6); ctx.fillRect(px+12,py+20,16,8);
+      ctx.fillStyle='#000'; ctx.fillRect(px+12,py+20,16,2);
+      break;
+    case T.STAIRS_UP:
+      ctx.fillStyle='#3a3a4a'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#aaa'; ctx.fillRect(px+12,py+4,16,8); ctx.fillRect(px+8,py+12,20,6); ctx.fillRect(px+4,py+20,24,6);
+      break;
+    case T.CHEST:
+      ctx.fillStyle=tileColor(curMap&&curMap.floor?T.FLOOR:T.GRASS);
+      if(curMap&&curMap.indoor){ctx.fillStyle='#3a3a4a';} else ctx.fillStyle='#1f7a34';
+      ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#b8860b'; ctx.fillRect(px+6,py+12,20,14);
+      ctx.fillStyle='#daa520'; ctx.fillRect(px+6,py+8,20,6);
+      ctx.fillStyle='#000'; ctx.fillRect(px+14,py+16,4,4);
+      break;
+    case T.SHOP:
+      ctx.fillStyle='#1f7a34'; if(curMap&&curMap.indoor)ctx.fillStyle='#3a3a4a';ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#4488cc'; ctx.fillRect(px+4,py+4,24,8);
+      ctx.fillStyle='#eee'; ctx.fillRect(px+4,py+12,24,16);
+      ctx.fillStyle='#000'; ctx.fillRect(px+13,py+18,6,10);
+      drawTextC('$',px+16,py+2,'#ffd700',12);
+      break;
+    case T.INN:
+      ctx.fillStyle='#1f7a34'; if(curMap&&curMap.indoor)ctx.fillStyle='#3a3a4a';ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#c47fc4'; ctx.fillRect(px+4,py+4,24,8);
+      ctx.fillStyle='#eee'; ctx.fillRect(px+4,py+12,24,16);
+      ctx.fillStyle='#000'; ctx.fillRect(px+13,py+18,6,10);
+      drawTextC('宿',px+16,py+2,'#fff',11);
+      break;
+    case T.LAVA:
+      ctx.fillStyle='#7a1500'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#ff5500'; const lw=Math.sin(animClock/200+px)*2;
+      ctx.fillRect(px+4,py+8+lw,10,4); ctx.fillRect(px+18,py+18-lw,8,4);
+      ctx.fillStyle='#ffcc00'; ctx.fillRect(px+8,py+10+lw,4,2);
+      break;
+    case T.BOSS:
+      ctx.fillStyle='#3a3a4a'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#a020f0'; ctx.beginPath();
+      ctx.arc(px+16,py+16,10,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ff00ff'; ctx.beginPath(); ctx.arc(px+16,py+16,5,0,Math.PI*2); ctx.fill();
+      break;
+    case T.EXIT:
+      ctx.fillStyle='#3a3a4a'; ctx.fillRect(px,py,s,s);
+      ctx.fillStyle='#88ddff'; ctx.fillRect(px+8,py+8,16,16);
+      ctx.fillStyle='#fff'; ctx.fillRect(px+12,py+12,8,8);
+      break;
+  }
+}
+
+/* ============================================================
+   MAP DATA
+   Maps are strings; we use a compact char map.
+   ============================================================ */
+const CH={
+  '.':T.GRASS,'T':T.TREE,'~':T.WATER,'^':T.MOUNTAIN,'o':T.TOWN,'C':T.CASTLE,
+  'v':T.CAVE,'#':T.WALL,' ':T.FLOOR,'=':T.BRIDGE,'s':T.SAND,'D':T.DOOR,
+  '>':T.STAIRS_DN,'<':T.STAIRS_UP,'$':T.CHEST,'S':T.SHOP,'I':T.INN,
+  'L':T.LAVA,'B':T.BOSS,'E':T.EXIT,'P':T.PATH,'f':T.FLOWER
+};
+function parseMap(rows){
+  return rows.map(r=>r.split('').map(c=>CH[c]!==undefined?CH[c]:T.GRASS));
+}
+
+/* World map */
+const WORLD = parseMap([
+"^^^^^^TTT....~~~~~~~~^^^^",
+"^.....T......~~~..~~~..^^",
+"^..oo.....TT..~~....~.v.^",
+"^..oo...^^.T...=....~...^",
+"^.......^^....~~~..TT...^",
+"^...TT........~~~....^^.^",
+"^..C......PP......T..^^.^",
+"^..C....PPPP....TT......^",
+"^.......PP..f.....~~~...^",
+"^....TT....oo.....~~~..v^",
+"^..^^......oo....TT.....^",
+"^..^^....s.....s....C...^",
+"^.......sss..~~ss...C...^",
+"^...v..ssss..~~~ss......^",
+"^.....ssss...~~~~s..oo..^",
+"^^^^^^^^^^^^^^^^^^^^^^^^^^"
+]);
+
+/* The WORLD positions of named features (col,row) -> destinations */
+// Lorasia castle (start) top-left towns area
+const worldFeatures = {}; // "c,r": {to, name}
+
+/* ---- Town: Lorasia Castle ---- */
+const LORASIA = parseMap([
+"##########",
+"#  D    I#",
+"# K    SS#",
+"#       S#",
+"# N      #",
+"#    N   #",
+"#  ####  #",
+"#  #  #  #",
+"#  #  #  #",
+"#### #####"
+]);
+
+/* ---- Town: Moonpeta ---- */
+const MOONPETA = parseMap([
+"############",
+"# I  N   S #",
+"#          #",
+"# S  TT  N #",
+"#    TT     ",
+"#       $   ",
+"# N      I #",
+"#   ####   #",
+"#   #  #   #",
+"############"
+]);
+
+/* ---- Town: Lupgana (port) ---- */
+const LUPGANA = parseMap([
+"############",
+"#S  N    I #",
+"#         S#",
+"# N   ~~~~ #",
+"#     ~~~~  ",
+"#  $  ~~~~  ",
+"# N   ~~~~ #",
+"#    N   I #",
+"#   ####   #",
+"############"
+]);
+
+/* ---- Town: Beranool ---- */
+const BERANOOL = parseMap([
+"##########",
+"# I  N  S#",
+"#        #",
+"# N  $   #",
+"#       S ",
+"#  TT    #",
+"# N   N  #",
+"#  ####  #",
+"#  #  #  #",
+"##########"
+]);
+
+/* ---- Town: Zahan ---- */
+const ZAHAN = parseMap([
+"##########",
+"#S   N  I#",
+"#        #",
+"#  N  N   ",
+"#        #",
+"#   $    #",
+"# I    S #",
+"#  ####  #",
+"#  #  #  #",
+"##########"
+]);
+
+/* ---- Cave 1: ふしぎなかぎの洞窟 ---- */
+const CAVE1 = parseMap([
+"##########",
+"#<   $   #",
+"#  ###   #",
+"#  # #   #",
+"#  # # ###",
+"#    #   $",
+"#### #   #",
+"#  $ #   #",
+"#    # > #",
+"##########"
+]);
+const CAVE1B = parseMap([
+"##########",
+"# <  ### #",
+"#    #$# #",
+"# ## # # #",
+"# #$   # #",
+"# #### ## ",
+"#    $   #",
+"#  ###   #",
+"#  # E   #",
+"##########"
+]);
+
+/* ---- Cave 2: ロンダルキアへの洞窟 ---- */
+const CAVE2 = parseMap([
+"##########",
+"#<  L L  #",
+"#  ## ## #",
+"#  $ L   #",
+"# ## #####",
+"#    $   #",
+"## ###L# #",
+"#  L   $ #",
+"#     >  #",
+"##########"
+]);
+
+/* ---- Final: ハーゴンの城 / シドー ---- */
+const HARGON = parseMap([
+"##########",
+"#<       #",
+"# ###### #",
+"# #L  L# #",
+"# # $$ # #",
+"# #    # #",
+"# ###D## #",
+"#        #",
+"#### B ###",
+"##########"
+]);
+
+/* ============================================================
+   MAP REGISTRY with metadata, warps, npcs, chests, shops
+   ============================================================ */
+const maps = {};
+
+function mkMap(id,grid,opts){
+  maps[id]=Object.assign({
+    id, grid, w:grid[0].length, h:grid.length,
+    indoor:false, floor:false, encounter:0, enemies:[],
+    warps:[], npcs:[], chests:[], shops:[], music:'town',
+    name:''
+  },opts);
+}
+
+mkMap('world',WORLD,{name:'アレフガルド',encounter:8,
+  enemies:['スライム','おおがらす','まどうし','メイジドラキー','がいこつ'],
+  warps:[
+    // town entrances mapped to tile positions on world
+    {x:3,y:2,to:'lorasia',tx:4,ty:8}, // Lorasia castle area (2 wide we use one)
+    {x:10,y:9,to:'moonpeta',tx:6,ty:8},
+    {x:19,y:14,to:'lupgana',tx:6,ty:8},
+    {x:19,y:11,to:'zahan',tx:5,ty:8},
+    {x:21,y:2,to:'cave1',tx:1,ty:1},
+    {x:22,y:9,to:'cave2',tx:1,ty:1},
+    {x:4,y:13,to:'beranool',tx:5,ty:8},
+  ]
+});
+// also make lorasia at second town tile and castle
+maps.world.warps.push({x:4,y:2,to:'lorasia',tx:4,ty:8});
+maps.world.warps.push({x:3,y:3,to:'lorasia',tx:4,ty:8});
+maps.world.warps.push({x:4,y:3,to:'lorasia',tx:4,ty:8});
+
+mkMap('lorasia',LORASIA,{name:'ローレシア城',indoor:true,
+  warps:[{x:4,y:9,to:'world',tx:3,ty:4}],
+  npcs:[
+    {x:3,y:2,name:'王',face:'king',lines:['ローレシアの王子よ。','ハーゴンを たおし','せかいに へいわを とりもどすのだ！','まずは ムーンブルクの ひめを さがすのじゃ。'],flag:'startQuest'},
+    {x:2,y:4,name:'へいし',face:'soldier',lines:['サマルトリアの 王子は','すでに たびに でられました。','ムーンペタの あたりに いるとか…']},
+    {x:5,y:5,name:'まちびと',face:'man',lines:['ふしぎなかぎが あれば','どんな とびらも あけられる そうだ。']},
+  ],
+  shops:[
+    {x:7,y:2,type:'weapon'},
+    {x:8,y:2,type:'weapon'},
+    {x:8,y:3,type:'armor'},
+  ]
+});
+
+mkMap('moonpeta',MOONPETA,{name:'ムーンペタ',indoor:true,
+  warps:[{x:6,y:8,to:'world',tx:10,ty:9},{x:5,y:8,to:'world',tx:10,ty:9}],
+  npcs:[
+    {x:5,y:1,name:'青年',face:'man',lines:['ぼくは サマルトリアの王子！','きみが ローレシアの王子か。','いっしょに たびを しよう！'],flag:'joinSamal',face2:'samal'},
+    {x:9,y:3,name:'うらないし',face:'woman',lines:['ムーンブルクの ひめは','まじゅつで すがたを かえられ','とらわれて いるそうよ…','ふしぎなかぎで すくえるかも。']},
+    {x:2,y:6,name:'むらびと',face:'man',lines:['きたの どうくつに','ふしぎなかぎが あると きいたよ。']},
+  ],
+  shops:[{x:9,y:1,type:'weapon'},{x:2,y:3,type:'item'}],
+  inns:[{x:2,y:1,cost:20},{x:9,y:6,cost:20}],
+  chests:[{x:8,y:5,gold:120}]
+});
+
+mkMap('lupgana',LUPGANA,{name:'ルプガナ',indoor:true,
+  warps:[{x:6,y:8,to:'world',tx:19,ty:14},{x:5,y:8,to:'world',tx:19,ty:14}],
+  npcs:[
+    {x:3,y:1,name:'せんちょう',face:'man',lines:['この みなとまちから','せかいへ ふねが でる。','ぶじを いのるぞ。']},
+    {x:2,y:6,name:'おんな',face:'woman',lines:['ベラヌールの まちでは','ねむりの やまいが はやって いるとか。']},
+  ],
+  shops:[{x:1,y:1,type:'armor'},{x:10,y:2,type:'item'}],
+  inns:[{x:9,y:1,cost:35},{x:9,y:7,cost:35}],
+  chests:[{x:3,y:5,item:'やくそう'}]
+});
+
+mkMap('beranool',BERANOOL,{name:'ベラヌール',indoor:true,
+  warps:[{x:5,y:9,to:'world',tx:4,ty:13},{x:4,y:9,to:'world',tx:4,ty:13}],
+  npcs:[
+    {x:3,y:1,name:'びょうにん',face:'man',lines:['ぐぅ… ねむい…','このまちは のろわれている…']},
+    {x:5,y:6,name:'たびびと',face:'man',lines:['ロンダルキアへの どうくつは','とても きけんだ。きを つけろ。']},
+  ],
+  shops:[{x:8,y:1,type:'weapon'},{x:8,y:4,type:'armor'}],
+  inns:[{x:2,y:1,cost:50}],
+  chests:[{x:4,y:3,gold:300}]
+});
+
+mkMap('zahan',ZAHAN,{name:'ザハン',indoor:true,
+  warps:[{x:5,y:8,to:'world',tx:19,ty:11},{x:4,y:8,to:'world',tx:19,ty:11}],
+  npcs:[
+    {x:5,y:1,name:'ろうじん',face:'man',lines:['ロンダルキアの おくに','ハーゴンの しろが ある。','シドーという まおうが いるそうじゃ。']},
+    {x:3,y:3,name:'むすめ',face:'woman',lines:['つよい そうびを そろえてね。']},
+    {x:6,y:3,name:'しょうにん',face:'man',lines:['いのちだいじに、だよ。']},
+  ],
+  shops:[{x:1,y:1,type:'weapon'},{x:8,y:6,type:'armor'}],
+  inns:[{x:8,y:1,cost:60},{x:1,y:6,cost:60}],
+  chests:[{x:4,y:5,item:'いのりのゆびわ'}]
+});
+
+mkMap('cave1',CAVE1,{name:'ふしぎなかぎの洞窟',indoor:true,floor:true,encounter:10,
+  enemies:['メイジドラキー','がいこつ','まどうし','キメラ'],
+  warps:[{x:1,y:1,to:'world',tx:21,ty:3},{x:7,y:8,to:'cave1b',tx:1,ty:1}],
+  chests:[{x:4,y:1,gold:80},{x:8,y:5,item:'やくそう'},{x:3,y:7,gold:150}]
+});
+mkMap('cave1b',CAVE1B,{name:'ふしぎなかぎの洞窟 B1',indoor:true,floor:true,encounter:9,
+  enemies:['がいこつ','まどうし','キメラ','よろいムカデ'],
+  warps:[{x:2,y:1,to:'cave1',tx:7,ty:8}],
+  // E = exit -> story: rescue Moonbrook princess
+  chests:[{x:5,y:2,item:'ふしぎなかぎ'},{x:3,y:4,gold:200},{x:5,y:6,item:'やくそう'}],
+  event:{x:5,y:8,id:'rescuePrincess'}
+});
+
+mkMap('cave2',CAVE2,{name:'ロンダルキアへの洞窟',indoor:true,floor:true,encounter:7,
+  enemies:['キメラ','よろいムカデ','ブリザード','デビルロード','じごくのきし'],
+  warps:[{x:1,y:1,to:'world',tx:22,ty:10},{x:6,y:8,to:'hargon',tx:1,ty:1}],
+  chests:[{x:4,y:3,gold:400},{x:5,y:5,item:'せいすい'},{x:7,y:7,gold:500}]
+});
+
+mkMap('hargon',HARGON,{name:'ハーゴンの城',indoor:true,floor:true,encounter:6,
+  enemies:['じごくのきし','デビルロード','ブリザード'],
+  warps:[{x:1,y:1,to:'cave2',tx:6,ty:8}],
+  chests:[{x:4,y:4,item:'せいすい'},{x:5,y:4,gold:1000}],
+  event:{x:5,y:8,id:'sidoFight'}
+});
+
+/* ============================================================
+   ITEMS, EQUIPMENT, SHOPS
+   ============================================================ */
+const ITEMS={
+  'やくそう':{type:'heal',hp:35,price:8,desc:'HPを35かいふく'},
+  'せいすい':{type:'special',price:120,desc:'まりょくを ふうじる'},
+  'ふしぎなかぎ':{type:'key',price:0,desc:'とびらを あける かぎ'},
+  'いのりのゆびわ':{type:'mpheal',mp:20,price:0,desc:'MPを20かいふく'},
+  'キメラのつばさ':{type:'warp',price:25,desc:'まちへ もどる'},
+};
+const WEAPONS={
+  'ひのきのぼう':{atk:2,price:10},
+  'どうのつるぎ':{atk:12,price:100},
+  'はがねのつるぎ':{atk:30,price:1500},
+  'おうじゃのけん':{atk:60,price:0},
+  'いかずちのつえ':{atk:18,price:780,mag:true},
+};
+const ARMORS={
+  'ぬののふく':{def:4,price:20},
+  'かわのよろい':{def:10,price:180},
+  'てつのよろい':{def:24,price:1000},
+  'みかわしのふく':{def:16,price:560},
+  'ロトのよろい':{def:50,price:0},
+};
+const shopStock={
+  weapon:[['ひのきのぼう','w'],['どうのつるぎ','w'],['はがねのつるぎ','w'],['いかずちのつえ','w']],
+  armor:[['ぬののふく','a'],['かわのよろい','a'],['みかわしのふく','a'],['てつのよろい','a']],
+  item:[['やくそう','i'],['せいすい','i'],['キメラのつばさ','i']],
+};
+
+/* ============================================================
+   PARTY / CHARACTERS
+   ============================================================ */
+function makeHero(name,role){
+  return {name,role,
+    lv:1,hp:0,maxhp:0,mp:0,maxmp:0,
+    str:0,agi:0,exp:0,
+    weapon:null,armor:null,
+    spells:[],alive:true,inParty:true};
+}
+let party=[];
+let bag={}; // item -> count
+let gold=0;
+let flags={};
+
+function freshGame(){
+  party=[];
+  const p1=makeHero('ローレシア','fighter');
+  p1.maxhp=p1.hp=25; p1.maxmp=p1.mp=0; p1.str=10; p1.agi=8;
+  p1.weapon='どうのつるぎ'; p1.armor='かわのよろい';
+  party.push(p1);
+  bag={'やくそう':3,'キメラのつばさ':1};
+  gold=120;
+  flags={};
+}
+
+const SPELLS={
+  'ホイミ':{mp:3,type:'heal',pow:35,target:'ally',desc:'HPを かいふく'},
+  'ベホイミ':{mp:7,type:'heal',pow:90,target:'ally',desc:'HPを 大かいふく'},
+  'ベホマ':{mp:10,type:'heal',pow:999,target:'ally',desc:'HPを 全かいふく'},
+  'ギラ':{mp:4,type:'attack',pow:18,target:'enemy',desc:'ねっせんの こうげき'},
+  'イオ':{mp:8,type:'attackAll',pow:30,target:'enemyAll',desc:'ばくはつ こうげき'},
+  'ラリホー':{mp:3,type:'sleep',target:'enemy',desc:'てきを ねむらせる'},
+  'マヌーサ':{mp:3,type:'blind',target:'enemy',desc:'てきを げんわく'},
+  'スクルト':{mp:3,type:'defup',target:'party',desc:'みかたの しゅびを 上げる'},
+  'バイキルト':{mp:6,type:'atkup',target:'ally',desc:'こうげき力を 上げる'},
+  'メラ':{mp:2,type:'attack',pow:10,target:'enemy',desc:'ほのおの たま'},
+  'ザオラル':{mp:10,type:'revive',target:'ally',desc:'なかまを そせい'},
+};
+
+/* level up tables: per role -> growth */
+function expForNext(lv){ return Math.floor(8*Math.pow(lv,2.1)+lv*4); }
+
+function tryLevelUp(h,log){
+  let leveled=false;
+  while(h.exp>=expForNext(h.lv) && h.lv<50){
+    h.lv++;
+    leveled=true;
+    let dhp,dmp,ds,da;
+    if(h.role==='fighter'){ dhp=rng(8,12); dmp=0; ds=rng(3,5); da=rng(2,3);}
+    else if(h.role==='balanced'){ dhp=rng(6,9); dmp=rng(2,4); ds=rng(2,4); da=rng(2,3);}
+    else { dhp=rng(4,7); dmp=rng(4,6); ds=rng(1,2); da=rng(2,4);}
+    h.maxhp+=dhp; h.hp+=dhp; h.maxmp+=dmp; h.mp+=dmp; h.str+=ds; h.agi+=da;
+    // learn spells
+    const learn=SPELL_LEARN[h.role]||{};
+    if(learn[h.lv]){ for(const sp of learn[h.lv]){ if(!h.spells.includes(sp)){ h.spells.push(sp); if(log)log.push(h.name+'は '+sp+'を おぼえた！'); } } }
+    if(log)log.push(h.name+'は レベル'+h.lv+'に あがった！');
+  }
+  return leveled;
+}
+const SPELL_LEARN={
+  balanced:{2:['ホイミ'],4:['ギラ'],6:['ラリホー'],9:['ベホイミ'],12:['イオ'],15:['ザオラル']},
+  mage:{1:['ホイミ','メラ'],3:['ギラ'],5:['マヌーサ'],7:['スクルト'],9:['ベホイミ'],11:['イオ'],13:['バイキルト'],16:['ベホマ']},
+  fighter:{}
+};
+
+/* ============================================================
+   GAME STATE MACHINE
+   ============================================================ */
+const STATE={TITLE:'title',MAP:'map',BATTLE:'battle',MENU:'menu',
+  DIALOG:'dialog',SHOP:'shop',GAMEOVER:'gameover',ENDING:'ending'};
+let state=STATE.TITLE;
+let curMapId='world', curMap=null;
+let player={x:5,y:4,dir:'down',px:5*TILE,py:4*TILE,moving:false,frame:0};
+let camX=0,camY=0;
+let animClock=0;
+let stepCount=0;
+
+/* dialog queue */
+let dialog=null; // {lines:[], i:0, after:fn}
+function say(lines,after){
+  dialog={lines:Array.isArray(lines)?lines:[lines],i:0,after:after||null};
+  state=STATE.DIALOG;
+}
+
+/* ============================================================
+   MAP MOVEMENT & RENDERING
+   ============================================================ */
+function loadMap(id,tx,ty){
+  curMapId=id; curMap=maps[id];
+  player.x=tx; player.y=ty;
+  player.px=tx*TILE; player.py=ty*TILE; player.moving=false;
+}
+function tileAt(mx,my){
+  if(!curMap)return T.WALL;
+  if(my<0||my>=curMap.h||mx<0||mx>=curMap.w)return T.WALL;
+  return curMap.grid[my][mx];
+}
+function isBlocked(mx,my){
+  const t=tileAt(mx,my);
+  if(SOLID.has(t))return true;
+  // NPC blocking
+  for(const n of (curMap.npcs||[])){ if(n.x===mx&&n.y===my)return true; }
+  return false;
+}
+
+function updateMap(dt){
+  if(player.moving){
+    const tx=player.x*TILE, ty=player.y*TILE;
+    const sp=4;
+    if(player.px<tx)player.px=Math.min(player.px+sp,tx);
+    if(player.px>tx)player.px=Math.max(player.px-sp,tx);
+    if(player.py<ty)player.py=Math.min(player.py+sp,ty);
+    if(player.py>ty)player.py=Math.max(player.py-sp,ty);
+    if(player.px===tx&&player.py===ty){
+      player.moving=false;
+      onArrive();
+    }
+    return;
+  }
+  // open menu
+  if(consume('x')){ openMenu(); return; }
+  // action (talk / interact / warp)
+  if(consume('z')){ interact(); return; }
+
+  let dx=0,dy=0;
+  if(keys.ArrowUp){dy=-1;player.dir='up';}
+  else if(keys.ArrowDown){dy=1;player.dir='down';}
+  else if(keys.ArrowLeft){dx=-1;player.dir='left';}
+  else if(keys.ArrowRight){dx=1;player.dir='right';}
+  if(dx||dy){
+    const nx=player.x+dx, ny=player.y+dy;
+    if(!isBlocked(nx,ny)){
+      player.x=nx; player.y=ny; player.moving=true; player.frame^=1;
+    }
+  }
+}
+
+function onArrive(){
+  // warps
+  for(const w of (curMap.warps||[])){
+    if(w.x===player.x&&w.y===player.y){
+      loadMap(w.to,w.tx,w.ty);
+      return;
+    }
+  }
+  // event tiles
+  if(curMap.event && curMap.event.x===player.x && curMap.event.y===player.y){
+    runEvent(curMap.event.id); return;
+  }
+  // chests auto? no, on Z. Encounter check
+  if(curMap.encounter>0){
+    stepCount++;
+    if(rnd(100)<curMap.encounter){ startBattle(); }
+  }
+}
+
+function frontTile(){
+  let dx=0,dy=0;
+  if(player.dir==='up')dy=-1;
+  if(player.dir==='down')dy=1;
+  if(player.dir==='left')dx=-1;
+  if(player.dir==='right')dx=1;
+  return {x:player.x+dx,y:player.y+dy};
+}
+
+function interact(){
+  const f=frontTile();
+  // NPC
+  for(const n of (curMap.npcs||[])){
+    if(n.x===f.x&&n.y===f.y){
+      say(n.lines,()=>{ if(n.flag) handleFlag(n.flag,n); });
+      return;
+    }
+  }
+  // chest on current OR front tile
+  const targets=[{x:player.x,y:player.y},f];
+  for(const tg of targets){
+    const t=tileAt(tg.x,tg.y);
+    if(t===T.CHEST){
+      for(const c of (curMap.chests||[])){
+        if(c.x===tg.x&&c.y===tg.y&&!c.opened){
+          c.opened=true;
+          curMap.grid[tg.y][tg.x]=curMap.floor?T.FLOOR:T.GRASS;
+          if(c.gold){ gold+=c.gold; say('たからばこを あけた！\n'+c.gold+'ゴールド てにいれた！'); }
+          else if(c.item){ addItem(c.item); say('たからばこを あけた！\n'+c.item+'を てにいれた！'); }
+          return;
+        }
+      }
+    }
+    if(t===T.SHOP){ openShopAt(tg.x,tg.y); return; }
+    if(t===T.INN){ openInnAt(tg.x,tg.y); return; }
+  }
+}
+
+function handleFlag(flag,n){
+  if(flag==='joinSamal' && !flags.samal){
+    flags.samal=true;
+    const s=makeHero('サマルトリア','balanced');
+    s.maxhp=s.hp=20; s.maxmp=s.mp=8; s.str=7; s.agi=7;
+    s.weapon='どうのつるぎ'; s.armor='ぬののふく';
+    s.spells=['ホイミ'];
+    party.push(s);
+    say('サマルトリアの王子が なかまに くわわった！');
+  }
+}
+
+function runEvent(id){
+  if(id==='rescuePrincess'){
+    if(flags.princess) { say('（だれも いない…）'); return; }
+    if(!bag['ふしぎなかぎ']){ say('かたく とざされた とびら。\nふしぎなかぎが ひつようだ。'); return; }
+    flags.princess=true;
+    const m=makeHero('ムーンブルク','mage');
+    m.maxhp=m.hp=18; m.maxmp=m.mp=16; m.str=5; m.agi=9;
+    m.weapon='ひのきのぼう'; m.armor='ぬののふく';
+    m.spells=['ホイミ','メラ','ギラ','マヌーサ'];
+    party.push(m);
+    say(['ふしぎなかぎで とびらを あけた！','とらわれていた ムーンブルクの王女を','たすけだした！','王女が なかまに くわわった！']);
+  }
+  if(id==='sidoFight'){
+    if(flags.sidoDefeated){ say('シドーは ほろびさった。\nせかいに へいわが もどった。'); return; }
+    say(['「ぐははは… よくぞ ここまで きた。」','「われは はかいしん シドー！」','「せかいを やみに つつむのだ！」'],()=>{
+      startBoss();
+    });
+  }
+}
+
+function addItem(it){ bag[it]=(bag[it]||0)+1; }
+function delItem(it){ if(bag[it]){bag[it]--; if(bag[it]<=0)delete bag[it];} }
+
+function drawMap(){
+  // camera centered
+  camX=clamp(player.px-VW/2+TILE/2,0,curMap.w*TILE-VW);
+  camY=clamp(player.py-VH/2+TILE/2,0,curMap.h*TILE-VH);
+  if(curMap.w*TILE<VW)camX=-(VW-curMap.w*TILE)/2;
+  if(curMap.h*TILE<VH)camY=-(VH-curMap.h*TILE)/2;
+  ctx.fillStyle=curMap.floor?'#101018':'#0a0a16';
+  ctx.fillRect(0,0,VW,VH);
+  const x0=Math.floor(camX/TILE), y0=Math.floor(camY/TILE);
+  for(let r=y0-1;r<y0+ROWS+2;r++){
+    for(let c=x0-1;c<x0+COLS+2;c++){
+      if(r<0||c<0||r>=curMap.h||c>=curMap.w)continue;
+      drawTile(curMap.grid[r][c],c*TILE-camX,r*TILE-camY);
+    }
+  }
+  // npcs
+  for(const n of (curMap.npcs||[])){
+    drawNPC(n,n.x*TILE-camX,n.y*TILE-camY);
+  }
+  // player
+  drawHeroSprite(player.px-camX,player.py-camY,player.dir,player.frame);
+  // location banner
+  drawLocationBar();
+}
+
+function drawLocationBar(){
+  if(!curMap.name)return;
+  drawWindow(8,8,170,40);
+  drawText(curMap.name,22,18,'#fff',16);
+}
+
+function drawNPC(n,x,y){
+  let col='#cc4444';
+  if(n.face==='king')col='#ffcc33';
+  if(n.face==='woman')col='#cc66cc';
+  if(n.face==='soldier')col='#8899bb';
+  ctx.fillStyle=col;
+  ctx.fillRect(x+8,y+6,16,20);
+  ctx.fillStyle='#f0c090'; ctx.fillRect(x+10,y+4,12,8); // head
+  ctx.fillStyle='#000'; ctx.fillRect(x+12,y+7,2,2); ctx.fillRect(x+18,y+7,2,2);
+  if(n.face==='king'){ ctx.fillStyle='#ffd700'; ctx.fillRect(x+9,y+1,14,4); }
+}
+
+function drawHeroSprite(x,y,dir,frame){
+  // Lorasia prince: blue tunic, gold trim
+  ctx.fillStyle='#1a3a8a';
+  ctx.fillRect(x+8,y+10,16,18);
+  ctx.fillStyle='#ffd700'; ctx.fillRect(x+8,y+10,16,3);
+  ctx.fillStyle='#f0c090'; ctx.fillRect(x+10,y+4,12,9); // head
+  ctx.fillStyle='#8a5a20'; ctx.fillRect(x+9,y+3,14,4); // hair
+  ctx.fillStyle='#000';
+  if(dir==='down'){ ctx.fillRect(x+12,y+8,2,2); ctx.fillRect(x+18,y+8,2,2); }
+  else if(dir==='up'){ ctx.fillStyle='#8a5a20'; ctx.fillRect(x+10,y+4,12,7); }
+  else if(dir==='left'){ ctx.fillRect(x+12,y+8,2,2); }
+  else { ctx.fillRect(x+18,y+8,2,2); }
+  // legs (walk anim)
+  ctx.fillStyle='#102040';
+  if(frame){ ctx.fillRect(x+9,y+28,5,4); ctx.fillRect(x+18,y+27,5,4); }
+  else { ctx.fillRect(x+9,y+27,5,4); ctx.fillRect(x+18,y+28,5,4); }
+}
+
+/* ============================================================
+   MENU SYSTEM
+   ============================================================ */
+let menu=null;
+function openMenu(){
+  menu={mode:'main',sel:0,sub:0,target:0};
+  state=STATE.MENU;
+}
+const MAIN_MENU=['つよさ','じゅもん','どうぐ','そうび','とじる'];
+
+function updateMenu(){
+  if(consume('x')){
+    if(menu.mode==='main'){ state=STATE.MAP; menu=null; return; }
+    menu.mode='main'; menu.sub=0; return;
+  }
+  if(menu.mode==='main'){
+    if(consume('ArrowUp'))menu.sel=(menu.sel+MAIN_MENU.length-1)%MAIN_MENU.length;
+    if(consume('ArrowDown'))menu.sel=(menu.sel+1)%MAIN_MENU.length;
+    if(consume('z')){
+      const c=MAIN_MENU[menu.sel];
+      if(c==='とじる'){ state=STATE.MAP; menu=null; }
+      else if(c==='つよさ')menu.mode='status';
+      else if(c==='じゅもん'){ menu.mode='spellWho'; menu.sub=0; }
+      else if(c==='どうぐ'){ menu.mode='item'; menu.sub=0; }
+      else if(c==='そうび')menu.mode='equip';
+    }
+  }
+  else if(menu.mode==='status'){ /* X exits */ }
+  else if(menu.mode==='spellWho'){
+    const casters=party.filter(h=>h.spells.length>0);
+    if(casters.length===0){ menu.mode='main'; return; }
+    if(consume('ArrowUp'))menu.sub=(menu.sub+casters.length-1)%casters.length;
+    if(consume('ArrowDown'))menu.sub=(menu.sub+1)%casters.length;
+    if(consume('z')){ menu.caster=casters[menu.sub]; menu.mode='spellPick'; menu.sub=0; }
+  }
+  else if(menu.mode==='spellPick'){
+    const sps=menu.caster.spells;
+    if(consume('ArrowUp'))menu.sub=(menu.sub+sps.length-1)%sps.length;
+    if(consume('ArrowDown'))menu.sub=(menu.sub+1)%sps.length;
+    if(consume('z')){
+      const sp=sps[menu.sub], d=SPELLS[sp];
+      if(menu.caster.mp<d.mp){ say('MPが たりない！'); return; }
+      if(d.type==='heal'){ menu.mode='spellTarget'; menu.curSpell=sp; menu.sub=0; }
+      else if(d.type==='revive'){ menu.mode='spellTarget'; menu.curSpell=sp; menu.sub=0; }
+      else { say('そのじゅもんは せんとうちゅうに つかえる。'); }
+    }
+  }
+  else if(menu.mode==='spellTarget'){
+    if(consume('ArrowUp'))menu.sub=(menu.sub+party.length-1)%party.length;
+    if(consume('ArrowDown'))menu.sub=(menu.sub+1)%party.length;
+    if(consume('z')){
+      const sp=menu.curSpell, d=SPELLS[sp], t=party[menu.sub];
+      if(d.type==='revive'){
+        if(t.alive){ say('そのひとは げんきだ。'); return; }
+        menu.caster.mp-=d.mp; t.alive=true; t.hp=Math.floor(t.maxhp/2);
+        say(t.name+'は いきかえった！'); menu.mode='main';
+      } else {
+        if(!t.alive){ say('そのひとは しんでいる。'); return; }
+        menu.caster.mp-=d.mp;
+        const heal=d.pow>=999?t.maxhp:d.pow;
+        t.hp=Math.min(t.maxhp,t.hp+heal);
+        say(menu.caster.name+'は '+sp+'を となえた！\n'+t.name+'の HPが かいふくした！');
+        menu.mode='main';
+      }
+    }
+  }
+  else if(menu.mode==='item'){
+    const items=Object.keys(bag);
+    if(items.length===0){ if(consume('z')||consume('x'))menu.mode='main'; return; }
+    if(consume('ArrowUp'))menu.sub=(menu.sub+items.length-1)%items.length;
+    if(consume('ArrowDown'))menu.sub=(menu.sub+1)%items.length;
+    if(consume('z')){
+      const it=items[menu.sub], d=ITEMS[it];
+      if(d.type==='heal'){ menu.mode='itemTarget'; menu.curItem=it; menu.sub=0; }
+      else if(d.type==='mpheal'){ menu.mode='itemTarget'; menu.curItem=it; menu.sub=0; }
+      else if(d.type==='warp'){
+        if(curMapId==='world'||curMap.indoor===false){ delItem(it); say('まちへ もどった。',()=>loadMap('lorasia',4,8)); }
+        else { say('ここでは つかえない。'); }
+      }
+      else say('それは いま つかえない。');
+    }
+  }
+  else if(menu.mode==='itemTarget'){
+    if(consume('ArrowUp'))menu.sub=(menu.sub+party.length-1)%party.length;
+    if(consume('ArrowDown'))menu.sub=(menu.sub+1)%party.length;
+    if(consume('z')){
+      const it=menu.curItem, d=ITEMS[it], t=party[menu.sub];
+      if(d.type==='heal'){ t.hp=Math.min(t.maxhp,t.hp+d.hp); delItem(it); say(t.name+'の HPが '+d.hp+'かいふく！'); }
+      else if(d.type==='mpheal'){ t.mp=Math.min(t.maxmp,t.mp+d.mp); say(t.name+'の MPが '+d.mp+'かいふく！'); }
+      menu.mode='main';
+    }
+  }
+  else if(menu.mode==='equip'){
+    if(consume('z')||consume('x'))menu.mode='main';
+  }
+}
+
+function drawMenu(){
+  drawMap(); // background
+  if(menu.mode==='main'){
+    drawWindow(360,8,144,180);
+    for(let i=0;i<MAIN_MENU.length;i++){
+      drawText((menu.sel===i?'▶':'  ')+MAIN_MENU[i],376,24+i*30,'#fff',18);
+    }
+    drawStatusStrip();
+  }
+  else if(menu.mode==='status'){
+    drawWindow(20,20,472,408);
+    let y=36;
+    for(const h of party){
+      drawText(h.name+' Lv'+h.lv,40,y,'#ffd700',18);
+      drawText('HP '+h.hp+'/'+h.maxhp+'  MP '+h.mp+'/'+h.maxmp,40,y+24,'#fff',16);
+      drawText('ちから '+h.str+'  すばやさ '+h.agi+'  EXP '+h.exp,40,y+44,'#aaccff',15);
+      drawText('ぶき:'+(h.weapon||'なし')+'  よろい:'+(h.armor||'なし'),40,y+62,'#cccccc',14);
+      y+=92;
+    }
+    drawText('Xで もどる',40,y,'#88aaff',14);
+  }
+  else if(menu.mode==='spellWho'){
+    drawWindow(20,260,472,170);
+    drawText('だれの じゅもん？',36,276,'#fff',16);
+    const casters=party.filter(h=>h.spells.length>0);
+    for(let i=0;i<casters.length;i++)
+      drawText((menu.sub===i?'▶':'  ')+casters[i].name+' MP'+casters[i].mp,40,304+i*30,'#fff',16);
+  }
+  else if(menu.mode==='spellPick'){
+    drawWindow(20,200,472,230);
+    drawText(menu.caster.name+'の じゅもん',36,214,'#ffd700',16);
+    const sps=menu.caster.spells;
+    for(let i=0;i<sps.length;i++){
+      const d=SPELLS[sps[i]];
+      drawText((menu.sub===i?'▶':'  ')+sps[i]+' (MP'+d.mp+')',40,242+i*26,'#fff',16);
+    }
+    drawText(SPELLS[sps[menu.sub]].desc,40,242+sps.length*26+6,'#88ddff',14);
+  }
+  else if(menu.mode==='spellTarget'||menu.mode==='itemTarget'){
+    drawWindow(20,280,472,150);
+    drawText('だれに？',36,294,'#fff',16);
+    for(let i=0;i<party.length;i++){
+      const h=party[i];
+      drawText((menu.sub===i?'▶':'  ')+h.name+' HP'+h.hp+'/'+h.maxhp,40,320+i*28,h.alive?'#fff':'#888',16);
+    }
+  }
+  else if(menu.mode==='item'){
+    drawWindow(20,200,472,230);
+    drawText('どうぐ',36,214,'#ffd700',16);
+    const items=Object.keys(bag);
+    if(items.length===0)drawText('なにも もっていない',40,250,'#aaa',16);
+    for(let i=0;i<items.length;i++)
+      drawText((menu.sub===i?'▶':'  ')+items[i]+' x'+bag[items[i]],40,242+i*26,'#fff',16);
+    drawText('Gold '+gold,360,214,'#ffd700',16);
+  }
+  else if(menu.mode==='equip'){
+    drawWindow(20,40,472,388);
+    drawText('そうび',36,54,'#ffd700',18);
+    let y=90;
+    for(const h of party){
+      const w=h.weapon?WEAPONS[h.weapon]:null, a=h.armor?ARMORS[h.armor]:null;
+      drawText(h.name,40,y,'#fff',16);
+      drawText('ぶき:'+(h.weapon||'なし')+' (こうげき+'+(w?w.atk:0)+')',60,y+22,'#ffaaaa',14);
+      drawText('よろい:'+(h.armor||'なし')+' (しゅび+'+(a?a.def:0)+')',60,y+40,'#aaffaa',14);
+      y+=80;
+    }
+    drawText('Xで もどる',40,y,'#88aaff',14);
+  }
+}
+
+function drawStatusStrip(){
+  drawWindow(8,300,344,140);
+  let y=312;
+  for(let i=0;i<party.length;i++){
+    const h=party[i];
+    drawText(h.name,22,y,h.alive?'#fff':'#f55',14);
+    drawText('HP'+h.hp+'/'+h.maxhp+'  MP'+h.mp+'/'+h.maxmp,22,y+18,'#aaccff',13);
+    y+=40;
+  }
+  drawText('Gold '+gold,240,312,'#ffd700',14);
+}
+
+/* ============================================================
+   SHOP / INN
+   ============================================================ */
+let shop=null;
+function openShopAt(x,y){
+  const sh=(curMap.shops||[]).find(s=>s.x===x&&s.y===y);
+  if(!sh){ openShopType('item'); return; }
+  openShopType(sh.type);
+}
+function openShopType(type){
+  shop={type,sel:0,stock:shopStock[type]||shopStock.item};
+  state=STATE.SHOP;
+}
+function updateShop(){
+  if(consume('x')){ state=STATE.MAP; shop=null; return; }
+  if(consume('ArrowUp'))shop.sel=(shop.sel+shop.stock.length-1)%shop.stock.length;
+  if(consume('ArrowDown'))shop.sel=(shop.sel+1)%shop.stock.length;
+  if(consume('z')){
+    const [name,kind]=shop.stock[shop.sel];
+    let price=0;
+    if(kind==='w')price=WEAPONS[name].price;
+    if(kind==='a')price=ARMORS[name].price;
+    if(kind==='i')price=ITEMS[name].price;
+    if(gold<price){ say('ゴールドが たりない！'); return; }
+    gold-=price;
+    if(kind==='i'){ addItem(name); say(name+'を かった！'); }
+    else { shop.pendingEquip={name,kind}; equipChoose(name,kind); }
+  }
+}
+function equipChoose(name,kind){
+  // auto-equip to best fit: weapon->fighter first; let player pick via dialog list
+  // simple: equip to currently selected first hero who can
+  // We'll show a target selection by reusing menu pattern inline:
+  shop.equipTarget={name,kind,sel:0};
+  shop.mode='equip';
+}
+function drawShop(){
+  drawMap();
+  drawWindow(20,40,472,388);
+  const titles={weapon:'ぶきや',armor:'ぼうぐや',item:'どうぐや'};
+  drawText(titles[shop.type]||'みせ',40,54,'#ffd700',18);
+  drawText('Gold '+gold,360,54,'#ffd700',16);
+  if(shop.mode==='equip'){
+    drawText(shop.equipTarget.name+' を だれに そうびさせる？',40,100,'#fff',16);
+    for(let i=0;i<party.length;i++){
+      drawText((shop.equipTarget.sel===i?'▶':'  ')+party[i].name,60,140+i*30,'#fff',16);
+    }
+    return;
+  }
+  let y=100;
+  for(let i=0;i<shop.stock.length;i++){
+    const [name,kind]=shop.stock[i];
+    let price=kind==='w'?WEAPONS[name].price:kind==='a'?ARMORS[name].price:ITEMS[name].price;
+    let stat='';
+    if(kind==='w')stat='こうげき+'+WEAPONS[name].atk;
+    if(kind==='a')stat='しゅび+'+ARMORS[name].def;
+    if(kind==='i')stat=ITEMS[name].desc;
+    drawText((shop.sel===i?'▶':'  ')+name,40,y,'#fff',16);
+    drawText(price+'G',280,y,'#ffd700',16);
+    drawText(stat,40,y+18,'#88ddff',13);
+    y+=46;
+  }
+  drawText('Z:かう  X:でる',40,y+10,'#88aaff',14);
+}
+function updateShopEquip(){
+  if(consume('x')){ shop.mode=null; return; }
+  const et=shop.equipTarget;
+  if(consume('ArrowUp'))et.sel=(et.sel+party.length-1)%party.length;
+  if(consume('ArrowDown'))et.sel=(et.sel+1)%party.length;
+  if(consume('z')){
+    const h=party[et.sel];
+    if(et.kind==='w')h.weapon=et.name; else h.armor=et.name;
+    shop.mode=null;
+    say(h.name+'は '+et.name+'を そうびした！');
+  }
+}
+
+let innData=null;
+function openInnAt(x,y){
+  const inn=(curMap.inns||[]).find(i=>i.x===x&&i.y===y) || {cost:20};
+  say('やどやへ ようこそ。\n1ぱく '+inn.cost+'ゴールド です。\nとまりますか？ (Z:はい X:いいえ)',()=>{});
+  innData={cost:inn.cost};
+  state=STATE.DIALOG;
+  // capture answer in dialog flow
+  dialog.inn=true;
+}
+
+/* ============================================================
+   BATTLE SYSTEM
+   ============================================================ */
+const ENEMIES={
+  'スライム':{hp:8,atk:5,def:2,agi:4,exp:2,gold:2,col:'#3399ff',shape:'slime'},
+  'おおがらす':{hp:12,atk:9,def:3,agi:12,exp:4,gold:5,col:'#444',shape:'bird'},
+  'メイジドラキー':{hp:16,atk:11,def:5,agi:9,exp:7,gold:8,col:'#aa44cc',shape:'bat',spell:'メラ'},
+  'まどうし':{hp:20,atk:10,def:6,agi:8,exp:10,gold:12,col:'#cc3333',shape:'mage',spell:'ギラ'},
+  'がいこつ':{hp:28,atk:18,def:10,agi:7,exp:16,gold:18,col:'#dddddd',shape:'skel'},
+  'キメラ':{hp:35,atk:22,def:12,agi:14,exp:24,gold:25,col:'#cc8844',shape:'bird'},
+  'よろいムカデ':{hp:48,atk:28,def:20,agi:10,exp:38,gold:40,col:'#88aa44',shape:'worm'},
+  'ブリザード':{hp:60,atk:34,def:18,agi:13,exp:55,gold:60,col:'#88ddff',shape:'mage',spell:'ギラ'},
+  'デビルロード':{hp:75,atk:40,def:24,agi:15,exp:80,gold:90,col:'#aa2266',shape:'devil',spell:'イオ'},
+  'じごくのきし':{hp:95,atk:48,def:30,agi:14,exp:120,gold:130,col:'#5566aa',shape:'knight'},
+  'シドー':{hp:600,atk:75,def:40,agi:18,exp:0,gold:0,col:'#cc44ff',shape:'boss',spell:'イオ',boss:true},
+};
+let battle=null;
+
+function spawnEnemyList(){
+  const pool=curMap.enemies;
+  const n=rng(1,Math.min(3,1+Math.floor(stepCount/30)%3+1));
+  const list=[];
+  for(let i=0;i<n;i++){
+    const name=pool[rnd(pool.length)];
+    const base=ENEMIES[name];
+    list.push(Object.assign({},base,{name,maxhp:base.hp,hp:base.hp,
+      asleep:0,blind:0,defmod:0,shake:0,flash:0,idx:i}));
+  }
+  return list;
+}
+function startBattle(){
+  battle={enemies:spawnEnemyList(),log:['まものが あらわれた！'],
+    turn:'menu',sel:0,actor:0,cmds:['たたかう','じゅもん','どうぐ','にげる'],
+    queue:[],phase:'cmd',target:0,subSel:0,subMode:null,busy:false,
+    shakeAll:0,flashScreen:0,fled:false,boss:false};
+  party.forEach(h=>{h.atkmod=0;h.defmod=0;});
+  state=STATE.BATTLE;
+}
+function startBoss(){
+  const base=ENEMIES['シドー'];
+  battle={enemies:[Object.assign({},base,{name:'シドー',maxhp:base.hp,hp:base.hp,asleep:0,blind:0,defmod:0,shake:0,flash:0,idx:0})],
+    log:['はかいしん シドーが','たちはだかった！'],
+    turn:'menu',sel:0,actor:0,cmds:['たたかう','じゅもん','どうぐ'],
+    queue:[],phase:'cmd',target:0,subSel:0,subMode:null,busy:false,
+    shakeAll:0,flashScreen:0,fled:false,boss:true};
+  party.forEach(h=>{h.atkmod=0;h.defmod=0;});
+  state=STATE.BATTLE;
+}
+
+function aliveEnemies(){ return battle.enemies.filter(e=>e.hp>0); }
+function aliveParty(){ return party.filter(h=>h.alive); }
+
+/* battle update is mostly menu-driven; resolution via async runTurn */
+function updateBattle(){
+  if(battle.busy)return;
+  if(battle.phase==='cmd'){
+    const actor=party[battle.actor];
+    if(!actor.alive){ nextActor(); return; }
+    if(battle.subMode==='spell'){
+      const sps=actor.spells;
+      if(consume('x')){ battle.subMode=null; return; }
+      if(consume('ArrowUp'))battle.subSel=(battle.subSel+sps.length-1)%sps.length;
+      if(consume('ArrowDown'))battle.subSel=(battle.subSel+1)%sps.length;
+      if(consume('z')){
+        const sp=sps[battle.subSel],d=SPELLS[sp];
+        if(actor.mp<d.mp){ battle.log=['MPが たりない！']; return; }
+        if(d.target==='enemy'){ battle.subMode='spellTarget'; battle.pendSpell=sp; battle.target=0; }
+        else { queueAction({type:'spell',sp,actor:battle.actor}); }
+      }
+      return;
+    }
+    if(battle.subMode==='spellTarget'){
+      const en=aliveEnemies();
+      if(consume('x')){ battle.subMode='spell'; return; }
+      if(consume('ArrowUp'))battle.target=(battle.target+en.length-1)%en.length;
+      if(consume('ArrowDown'))battle.target=(battle.target+1)%en.length;
+      if(consume('z')){ queueAction({type:'spell',sp:battle.pendSpell,actor:battle.actor,tgt:en[battle.target].idx}); }
+      return;
+    }
+    if(battle.subMode==='item'){
+      const items=Object.keys(bag).filter(it=>ITEMS[it].type==='heal'||ITEMS[it].type==='special');
+      if(consume('x')){ battle.subMode=null; return; }
+      if(items.length===0){ battle.subMode=null; return; }
+      if(consume('ArrowUp'))battle.subSel=(battle.subSel+items.length-1)%items.length;
+      if(consume('ArrowDown'))battle.subSel=(battle.subSel+1)%items.length;
+      if(consume('z')){ queueAction({type:'item',item:items[battle.subSel],actor:battle.actor}); }
+      return;
+    }
+    if(battle.subMode==='enemyTarget'){
+      const en=aliveEnemies();
+      if(consume('x')){ battle.subMode=null; return; }
+      if(consume('ArrowUp'))battle.target=(battle.target+en.length-1)%en.length;
+      if(consume('ArrowDown'))battle.target=(battle.target+1)%en.length;
+      if(consume('z')){ queueAction({type:'attack',actor:battle.actor,tgt:en[battle.target].idx}); }
+      return;
+    }
+    // main command
+    if(consume('ArrowUp'))battle.sel=(battle.sel+battle.cmds.length-1)%battle.cmds.length;
+    if(consume('ArrowDown'))battle.sel=(battle.sel+1)%battle.cmds.length;
+    if(consume('z')){
+      const c=battle.cmds[battle.sel];
+      if(c==='たたかう'){ battle.subMode='enemyTarget'; battle.target=0; }
+      else if(c==='じゅもん'){ if(actor.spells.length===0){ battle.log=['じゅもんを おぼえていない！']; } else { battle.subMode='spell'; battle.subSel=0; } }
+      else if(c==='どうぐ'){ battle.subMode='item'; battle.subSel=0; }
+      else if(c==='にげる'){ queueAction({type:'flee',actor:battle.actor}); }
+    }
+  }
+}
+function queueAction(a){
+  battle.queue.push(a);
+  battle.subMode=null;
+  nextActor();
+}
+function nextActor(){
+  battle.actor++;
+  while(battle.actor<party.length && !party[battle.actor].alive)battle.actor++;
+  if(battle.actor>=party.length){ resolveTurn(); }
+}
+
+async function resolveTurn(){
+  battle.busy=true;
+  battle.phase='resolve';
+  // build actor list: party actions + enemy actions, sort by agi
+  const acts=[];
+  for(const a of battle.queue){
+    const h=party[a.actor];
+    acts.push({side:'party',agi:h.agi+rnd(4),a});
+  }
+  for(const e of aliveEnemies()){
+    acts.push({side:'enemy',agi:e.agi+rnd(4),e});
+  }
+  acts.sort((x,y)=>y.agi-x.agi);
+  // flee handled: if flee queued and succeeds, skip
+  for(const ac of acts){
+    if(aliveParty().length===0)break;
+    if(aliveEnemies().length===0)break;
+    if(ac.side==='party'){
+      await doPartyAction(ac.a);
+    } else {
+      if(ac.e.hp<=0)continue;
+      await doEnemyAction(ac.e);
+    }
+    if(battle.fled)break;
+    if(checkBattleEnd())break;
+  }
+  battle.queue=[];
+  if(battle.fled){ endBattle('flee'); return; }
+  if(aliveEnemies().length===0){ endBattle('win'); return; }
+  if(aliveParty().length===0){ endBattle('lose'); return; }
+  // next round
+  battle.actor=0; while(battle.actor<party.length&&!party[battle.actor].alive)battle.actor++;
+  battle.phase='cmd'; battle.busy=false; battle.sel=0;
+}
+
+function checkBattleEnd(){ return aliveEnemies().length===0||aliveParty().length===0; }
+
+async function doPartyAction(a){
+  const h=party[a.actor];
+  if(!h.alive)return;
+  if(a.type==='flee'){
+    const ec=aliveEnemies();
+    const eAgi=ec.reduce((s,e)=>s+e.agi,0)/ec.length;
+    if(battle.boss){ await logFlash([h.name+'は にげだそうとした…','が まわりこまれた！']); return; }
+    if(h.agi+rnd(20)>eAgi){ battle.fled=true; await logFlash([h.name+'たちは にげだした！']); }
+    else await logFlash([h.name+'は にげられなかった！']);
+    return;
+  }
+  if(a.type==='attack'){
+    let e=battle.enemies.find(en=>en.idx===a.tgt);
+    if(!e||e.hp<=0)e=aliveEnemies()[0];
+    if(!e)return;
+    const w=h.weapon?WEAPONS[h.weapon].atk:0;
+    let dmg=Math.max(1,Math.floor((h.str+w)/2 + (h.atkmod||0) - e.def/2 + rnd(4)));
+    if(rnd(32)===0){ dmg*=2; await logFlash([h.name+'の かいしんの いちげき！']); }
+    else await logFlash([h.name+'の こうげき！']);
+    e.hp-=dmg; e.shake=12; e.flash=10;
+    await logFlash([e.name+'に '+dmg+'の ダメージ！'],300);
+    if(e.hp<=0)await logFlash([e.name+'を たおした！']);
+    return;
+  }
+  if(a.type==='spell'){
+    const d=SPELLS[a.sp];
+    if(h.mp<d.mp)return;
+    h.mp-=d.mp;
+    await logFlash([h.name+'は '+a.sp+'を となえた！']);
+    if(d.type==='attack'){
+      let e=battle.enemies.find(en=>en.idx===a.tgt);
+      if(!e||e.hp<=0)e=aliveEnemies()[0]; if(!e)return;
+      let dmg=d.pow+rnd(d.pow/2)|0; e.hp-=dmg; e.flash=10; e.shake=10;
+      battle.flashScreen=8;
+      await logFlash([e.name+'に '+dmg+'の ダメージ！'],300);
+      if(e.hp<=0)await logFlash([e.name+'を たおした！']);
+    }
+    else if(d.type==='attackAll'){
+      battle.flashScreen=12; battle.shakeAll=10;
+      for(const e of aliveEnemies()){ let dmg=d.pow+rnd(d.pow/2)|0; e.hp-=dmg; e.flash=10; }
+      await logFlash(['てき ぜんたいに ダメージ！'],400);
+      for(const e of battle.enemies)if(e.hp<=0&&!e._dead){e._dead=true;}
+    }
+    else if(d.type==='heal'){
+      const heal=d.pow>=999?h.maxhp:d.pow+rnd(8);
+      h.hp=Math.min(h.maxhp,h.hp+heal);
+      await logFlash([h.name+'の HPが かいふくした！']);
+    }
+    else if(d.type==='sleep'){
+      const e=aliveEnemies()[0]; if(e){ if(rnd(3)>0){ e.asleep=rng(2,4); await logFlash([e.name+'は ねむった！']); } else await logFlash(['しかし きかなかった！']); }
+    }
+    else if(d.type==='blind'){
+      for(const e of aliveEnemies())e.blind=rng(2,4);
+      await logFlash(['てきは げんわくした！']);
+    }
+    else if(d.type==='defup'){ party.forEach(p=>p.defmod=(p.defmod||0)+8); await logFlash(['みかたの しゅびりょくが あがった！']); }
+    else if(d.type==='atkup'){ h.atkmod=(h.atkmod||0)+12; await logFlash([h.name+'の こうげきりょくが あがった！']); }
+  }
+  if(a.type==='item'){
+    const it=a.item,d=ITEMS[it];
+    if(d.type==='heal'){ h.hp=Math.min(h.maxhp,h.hp+d.hp); delItem(it); await logFlash([h.name+'は '+it+'を つかった！','HPが かいふくした！']); }
+    else if(d.type==='special'){ delItem(it); await logFlash([h.name+'は せいすいを つかった！']); }
+  }
+}
+
+async function doEnemyAction(e){
+  if(e.asleep>0){ e.asleep--; await logFlash([e.name+'は ねむっている…']); return; }
+  const targets=aliveParty();
+  if(targets.length===0)return;
+  const t=targets[rnd(targets.length)];
+  // spell?
+  if(e.spell && rnd(3)===0){
+    const d=SPELLS[e.spell];
+    await logFlash([e.name+'は '+e.spell+'を となえた！']);
+    if(d.type==='attackAll'||e.boss&&rnd(2)===0){
+      battle.flashScreen=12;
+      for(const p of aliveParty()){ let dmg=Math.max(1,(d.pow||30)+rnd(10)-(p.defmod||0)); p.hp-=dmg; }
+      battle.shakeParty=12;
+      await logFlash(['パーティーぜんたいに ダメージ！'],400);
+    } else {
+      let dmg=Math.max(1,(d.pow||15)+rnd(8)-(t.defmod||0));
+      t.hp-=dmg; battle.shakeParty=10; battle.flashScreen=6;
+      await logFlash([t.name+'は '+dmg+'の ダメージ！'],300);
+    }
+  } else {
+    if(e.blind>0 && rnd(2)===0){ e.blind--; await logFlash([e.name+'の こうげきは はずれた！']); return; }
+    let dmg=Math.max(1,Math.floor(e.atk/2 - (defOf(t)/3) - (t.defmod||0)/2 + rnd(4)));
+    if(e.boss && rnd(4)===0){ dmg=Math.floor(dmg*1.6); await logFlash([e.name+'の もうこうげき！']); }
+    else await logFlash([e.name+'の こうげき！']);
+    t.hp-=dmg; battle.shakeParty=10; battle.flashScreen=4;
+    await logFlash([t.name+'は '+dmg+'の ダメージ！'],300);
+  }
+  for(const p of party){ if(p.hp<=0&&p.alive){ p.hp=0; p.alive=false; await logFlash([p.name+'は しんでしまった！']); } }
+}
+function defOf(h){ return (h.armor?ARMORS[h.armor].def:0); }
+
+async function logFlash(lines,delay){
+  battle.log=lines;
+  drawBattle();
+  await wait(delay||550);
+}
+
+async function endBattle(result){
+  if(result==='flee'){ battle=null; state=STATE.MAP; return; }
+  if(result==='win'){
+    let exp=0,g=0;
+    for(const e of battle.enemies){ exp+=e.exp; g+=e.gold; }
+    gold+=g;
+    const log=['まものを やっつけた！','けいけんち '+exp+' かくとく！',g+'ゴールドを てにいれた！'];
+    for(const h of aliveParty()){ h.exp+=exp; tryLevelUp(h,log); }
+    const wasBoss=battle.boss;
+    battle.log=log; battle.busy=true;
+    drawBattle();
+    await wait(1400);
+    battle=null;
+    if(wasBoss){ flags.sidoDefeated=true; state=STATE.ENDING; endTimer=0; }
+    else state=STATE.MAP;
+    return;
+  }
+  if(result==='lose'){
+    battle=null; state=STATE.GAMEOVER; goTimer=0;
+  }
+}
+
+/* ---- battle rendering ---- */
+function drawEnemySprite(e,x,y,scale){
+  const s=scale||1;
+  ctx.save();
+  ctx.translate(x,y);
+  if(e.shake>0){ ctx.translate(rnd(7)-3,0); }
+  const col=e.flash>0?'#ffffff':e.col;
+  ctx.fillStyle=col;
+  const W=60*s,H=60*s;
+  switch(e.shape){
+    case 'slime':
+      ctx.beginPath(); ctx.ellipse(0,10*s,28*s,22*s,0,Math.PI,0);
+      ctx.quadraticCurveTo(0,-22*s,-28*s,10*s); ctx.fill();
+      ctx.fillStyle='#fff'; ctx.fillRect(-12*s,-2*s,5*s,8*s); ctx.fillRect(7*s,-2*s,5*s,8*s);
+      ctx.fillStyle='#000'; ctx.fillRect(-10*s,2*s,3*s,4*s); ctx.fillRect(9*s,2*s,3*s,4*s);
+      break;
+    case 'bird':
+      ctx.beginPath(); ctx.ellipse(0,0,20*s,24*s,0,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-20*s,-4*s); ctx.lineTo(-46*s,-14*s); ctx.lineTo(-22*s,8*s); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(20*s,-4*s); ctx.lineTo(46*s,-14*s); ctx.lineTo(22*s,8*s); ctx.fill();
+      ctx.fillStyle='#ffaa00'; ctx.beginPath(); ctx.moveTo(0,-2*s);ctx.lineTo(10*s,4*s);ctx.lineTo(0,8*s);ctx.fill();
+      ctx.fillStyle='#fff'; ctx.fillRect(-10*s,-12*s,5*s,5*s); ctx.fillRect(5*s,-12*s,5*s,5*s);
+      break;
+    case 'bat':
+      ctx.beginPath(); ctx.arc(0,0,16*s,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-14*s,0);ctx.lineTo(-44*s,-16*s);ctx.lineTo(-40*s,10*s);ctx.fill();
+      ctx.beginPath(); ctx.moveTo(14*s,0);ctx.lineTo(44*s,-16*s);ctx.lineTo(40*s,10*s);ctx.fill();
+      ctx.fillStyle='#ff0'; ctx.fillRect(-8*s,-4*s,4*s,4*s); ctx.fillRect(4*s,-4*s,4*s,4*s);
+      break;
+    case 'mage':
+      ctx.beginPath(); ctx.moveTo(0,-28*s);ctx.lineTo(24*s,28*s);ctx.lineTo(-24*s,28*s);ctx.fill();
+      ctx.fillStyle='#f0c090'; ctx.fillRect(-8*s,-6*s,16*s,12*s);
+      ctx.fillStyle='#000'; ctx.fillRect(-6*s,-2*s,3*s,3*s); ctx.fillRect(3*s,-2*s,3*s,3*s);
+      break;
+    case 'skel':
+      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(0,-12*s,14*s,0,Math.PI*2); ctx.fill();
+      ctx.fillRect(-10*s,0,20*s,24*s);
+      ctx.fillStyle='#000'; ctx.fillRect(-8*s,-14*s,5*s,6*s); ctx.fillRect(3*s,-14*s,5*s,6*s);
+      ctx.fillStyle='#888'; for(let i=0;i<3;i++)ctx.fillRect(-9*s,4*s+i*7*s,18*s,3*s);
+      break;
+    case 'worm':
+      for(let i=0;i<5;i++){ ctx.beginPath(); ctx.arc(-30*s+i*15*s,Math.sin(i)*6*s,11*s,0,Math.PI*2); ctx.fill(); }
+      ctx.fillStyle='#000'; ctx.fillRect(28*s,-6*s,3*s,3*s);
+      break;
+    case 'devil':
+      ctx.beginPath(); ctx.arc(0,0,22*s,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-16*s,-16*s);ctx.lineTo(-26*s,-34*s);ctx.lineTo(-6*s,-20*s);ctx.fill();
+      ctx.beginPath(); ctx.moveTo(16*s,-16*s);ctx.lineTo(26*s,-34*s);ctx.lineTo(6*s,-20*s);ctx.fill();
+      ctx.fillStyle='#ff0'; ctx.fillRect(-10*s,-4*s,6*s,5*s); ctx.fillRect(4*s,-4*s,6*s,5*s);
+      break;
+    case 'knight':
+      ctx.fillRect(-16*s,-26*s,32*s,52*s);
+      ctx.fillStyle='#222'; ctx.fillRect(-12*s,-20*s,24*s,8*s);
+      ctx.fillStyle='#ff3333'; ctx.fillRect(-3*s,-30*s,6*s,8*s);
+      ctx.fillStyle='#888'; ctx.fillRect(-24*s,-10*s,8*s,30*s);
+      break;
+    case 'boss':
+      ctx.beginPath(); ctx.arc(0,0,40*s,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ff00ff'; ctx.beginPath(); ctx.arc(0,0,26*s,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(-30*s,-30*s);ctx.lineTo(-50*s,-60*s);ctx.lineTo(-12*s,-36*s);ctx.fill();
+      ctx.beginPath(); ctx.moveTo(30*s,-30*s);ctx.lineTo(50*s,-60*s);ctx.lineTo(12*s,-36*s);ctx.fill();
+      ctx.fillStyle='#ffff00'; ctx.fillRect(-16*s,-8*s,10*s,8*s); ctx.fillRect(6*s,-8*s,10*s,8*s);
+      ctx.fillStyle='#000'; ctx.fillRect(-12*s,-4*s,4*s,4*s); ctx.fillRect(8*s,-4*s,4*s,4*s);
+      break;
+    default:
+      ctx.beginPath(); ctx.arc(0,0,22*s,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBattle(){
+  // background gradient
+  let bg=ctx.createLinearGradient(0,0,0,VH);
+  bg.addColorStop(0,battle.boss?'#1a0030':'#001030');
+  bg.addColorStop(1,'#000');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,VW,VH);
+  if(battle.flashScreen>0){ ctx.fillStyle='rgba(255,255,255,'+(battle.flashScreen/20)+')'; ctx.fillRect(0,0,VW,VH); battle.flashScreen--; }
+  // floor
+  ctx.fillStyle=battle.boss?'#220033':'#0a1a1a'; ctx.fillRect(0,300,VW,148);
+  // enemies
+  const en=battle.enemies;
+  const baseY=200;
+  const n=en.length;
+  for(let i=0;i<n;i++){
+    const e=en[i];
+    if(e.hp<=0 && e._fade===undefined)e._fade=1;
+    if(e.hp<=0){ e._fade-=0.06; if(e._fade<0)e._fade=0; ctx.globalAlpha=e._fade; }
+    const x=VW/2 + (i-(n-1)/2)*120;
+    const scale=battle.boss?1.7:1.1;
+    drawEnemySprite(e,x,baseY,scale);
+    ctx.globalAlpha=1;
+    if(e.shake>0)e.shake--;
+    if(e.flash>0)e.flash--;
+    // name+hp under
+    if(e.hp>0){
+      ctx.fillStyle='#fff'; ctx.font='12px monospace';
+      drawTextC(e.name,x,baseY+50,'#fff',13);
+    }
+  }
+  if(battle.shakeAll>0)battle.shakeAll--;
+  // party status panel
+  drawBattlePartyPanel();
+  // message window
+  drawWindow(8,300,332,92);
+  let ly=312;
+  for(const l of battle.log){ drawText(l,22,ly,'#fff',15); ly+=22; }
+  // command window
+  if(battle.phase==='cmd'&&!battle.busy){ drawBattleCmd(); }
+}
+function drawBattlePartyPanel(){
+  const x=350,y=300,w=154;
+  let sx=battle.shakeParty>0?rnd(6)-3:0;
+  if(battle.shakeParty>0)battle.shakeParty--;
+  drawWindow(x+sx,y,w,140);
+  let yy=y+10;
+  for(const h of party){
+    const c=h.alive?(h.hp<h.maxhp*0.25?'#ff6666':'#ffffff'):'#666';
+    drawText(h.name,x+12+sx,yy,c,13);
+    drawText('H'+Math.max(0,h.hp)+' M'+h.mp,x+12+sx,yy+15,'#aaccff',12);
+    yy+=34;
+  }
+}
+function drawBattleCmd(){
+  const actor=party[battle.actor];
+  // highlight current actor name
+  drawText('▼'+actor.name,355,288,'#ffd700',13);
+  if(battle.subMode==='spell'){
+    drawWindow(140,150,232,170);
+    drawText(actor.name+'の じゅもん',156,162,'#ffd700',15);
+    const sps=actor.spells;
+    for(let i=0;i<sps.length;i++){
+      const d=SPELLS[sps[i]];
+      drawText((battle.subSel===i?'▶':'  ')+sps[i]+'(MP'+d.mp+')',156,186+i*22,'#fff',14);
+    }
+  } else if(battle.subMode==='item'){
+    drawWindow(140,180,232,140);
+    drawText('どうぐ',156,192,'#ffd700',15);
+    const items=Object.keys(bag).filter(it=>ITEMS[it].type==='heal'||ITEMS[it].type==='special');
+    if(items.length===0)drawText('つかえる どうぐが ない',156,216,'#aaa',13);
+    for(let i=0;i<items.length;i++)
+      drawText((battle.subSel===i?'▶':'  ')+items[i]+' x'+bag[items[i]],156,216+i*22,'#fff',14);
+  } else if(battle.subMode==='enemyTarget'||battle.subMode==='spellTarget'){
+    const en=aliveEnemies();
+    // draw arrow over selected enemy
+    const sel=en[battle.target];
+    if(sel){
+      const i=en.indexOf(sel); const total=en.length;
+      const x=VW/2+(battle.enemies.indexOf(sel)-(battle.enemies.length-1)/2)*120;
+      drawTextC('▼',x,140,'#ffff00',24);
+    }
+    drawWindow(8,250,150,40);
+    drawText('だれを？',22,260,'#fff',15);
+  } else {
+    // main commands, 2x2 layout
+    drawWindow(8,250,160,52);
+    for(let i=0;i<battle.cmds.length;i++){
+      const r=Math.floor(i/2), c=i%2;
+      drawText((battle.sel===i?'▶':' ')+battle.cmds[i],16+c*78,258+r*20,'#fff',13);
+    }
+  }
+}
+
+/* ============================================================
+   TITLE / SAVE / LOAD
+   ============================================================ */
+let title={sel:0,slots:[]};
+function loadSlots(){
+  title.slots=[];
+  for(let i=0;i<3;i++){
+    const raw=localStorage.getItem('dq2_slot'+i);
+    title.slots.push(raw?JSON.parse(raw):null);
+  }
+}
+function saveGame(slot){
+  const data={party,bag,gold,flags,curMapId,
+    px:player.x,py:player.y,dir:player.dir,
+    maps:serializeMapState()};
+  localStorage.setItem('dq2_slot'+slot,JSON.stringify(data));
+}
+function serializeMapState(){
+  const st={};
+  for(const id in maps){
+    const m=maps[id];
+    if(m.chests&&m.chests.some(c=>c.opened))
+      st[id]={opened:m.chests.map(c=>!!c.opened),grid:m.grid};
+  }
+  return st;
+}
+function applyMapState(st){
+  for(const id in st){
+    const m=maps[id];
+    if(!m)continue;
+    if(st[id].opened){
+      st[id].opened.forEach((o,i)=>{ if(o&&m.chests[i]){ m.chests[i].opened=true; const c=m.chests[i]; m.grid[c.y][c.x]=m.floor?T.FLOOR:T.GRASS; } });
+    }
+  }
+}
+function loadGame(slot){
+  const raw=localStorage.getItem('dq2_slot'+slot);
+  if(!raw)return false;
+  const d=JSON.parse(raw);
+  party=d.party; bag=d.bag; gold=d.gold; flags=d.flags;
+  if(d.maps)applyMapState(d.maps);
+  loadMap(d.curMapId,d.px,d.py);
+  player.dir=d.dir||'down';
+  state=STATE.MAP;
+  return true;
+}
+
+function updateTitle(){
+  loadSlotsIfNeeded();
+  if(consume('ArrowUp'))title.sel=(title.sel+3)%4;
+  if(consume('ArrowDown'))title.sel=(title.sel+1)%4;
+  if(consume('z')){
+    if(title.sel<3){
+      if(title.slots[title.sel]){ loadGame(title.sel); }
+      else { freshGame(); saveGame(title.sel); currentSlot=title.sel; loadMap('lorasia',4,8); state=STATE.MAP; say(['ぼうけんの しょを つくった。','Xメニューから いつでも セーブできる。','まず 王さまに はなしかけよう。']); }
+      currentSlot=title.sel;
+    } else {
+      // erase mode
+      title.eraseMode=!title.eraseMode;
+    }
+  }
+  if(title.eraseMode && title.sel<3 && consume('x')){
+    localStorage.removeItem('dq2_slot'+title.sel); title.slotsLoaded=false;
+  }
+}
+let currentSlot=0;
+function loadSlotsIfNeeded(){ if(!title.slotsLoaded){ loadSlots(); title.slotsLoaded=true; } }
+
+let logoT=0;
+function drawTitle(){
+  ctx.fillStyle='#000020'; ctx.fillRect(0,0,VW,VH);
+  // starfield
+  for(let i=0;i<40;i++){
+    const x=(i*97+animClock*0.02*(i%3+1))%VW;
+    const y=(i*53)%200;
+    ctx.fillStyle='rgba(255,255,255,'+(0.3+0.5*Math.sin(animClock/300+i))+')';
+    ctx.fillRect(x,y,2,2);
+  }
+  logoT+=0.05;
+  const sc=1+Math.sin(logoT)*0.03;
+  ctx.save();
+  ctx.translate(VW/2,80); ctx.scale(sc,sc);
+  drawTextC('DRAGON QUEST',0,-24,'#ffd700',30);
+  drawTextC('II',0,8,'#ffaa00',40);
+  ctx.restore();
+  drawTextC('～ 悪霊の神々 風 ～',VW/2,150,'#88aaff',16);
+  // slots
+  drawWindow(120,200,272,200);
+  drawTextC('ぼうけんの しょ',VW/2,212,'#ffd700',16);
+  for(let i=0;i<3;i++){
+    const s=title.slots[i];
+    let label;
+    if(s){ const lv=s.party[0].lv; label=(i+1)+': '+s.party[0].name+'王子 Lv'+lv+' '+s.gold+'G'; }
+    else label=(i+1)+': （ あたらしい たびだち ）';
+    drawText((title.sel===i?'▶':'  ')+label,140,244+i*36,s?'#fff':'#aaccaa',15);
+  }
+  drawText((title.sel===3?'▶':'  ')+'けす'+(title.eraseMode?' (Xで選んだ書を消去)':''),140,360,title.eraseMode?'#ff6666':'#fff',15);
+  drawTextC('Z:けってい  X:キャンセル',VW/2,418,'#7788bb',13);
+}
+
+/* ============================================================
+   DIALOG
+   ============================================================ */
+function updateDialog(){
+  if(consume('z')||consume('x')){
+    dialog.i++;
+    if(dialog.i>=dialog.lines.length){
+      const after=dialog.after;
+      const wasInn=dialog.inn;
+      dialog=null;
+      state=STATE.MAP;
+      if(wasInn){ doInn(); }
+      if(after)after();
+    }
+  }
+}
+function doInn(){
+  // simple: charge & heal (assume yes)
+  if(gold>=innData.cost){
+    gold-=innData.cost;
+    party.forEach(h=>{ if(h.alive){h.hp=h.maxhp;h.mp=h.maxmp;} });
+    say('おやすみなさい…\nＨＰと ＭＰが かいふくした！');
+  } else {
+    say('ゴールドが たりないようです…');
+  }
+  innData=null;
+}
+function drawDialog(){
+  drawMap();
+  drawWindow(20,300,472,128);
+  const lines=dialog.lines[dialog.i].split('\n');
+  let y=320;
+  for(const l of lines){ drawText(l,40,y,'#fff',18); y+=26; }
+  drawText('▼',468,400,'#ffd700',16);
+}
+
+/* ============================================================
+   GAME OVER / ENDING
+   ============================================================ */
+let goTimer=0, endTimer=0;
+function updateGameOver(){
+  goTimer++;
+  if(goTimer>40 && (consume('z')||consume('x'))){
+    // revive at lorasia with half gold
+    party.forEach(h=>{ h.alive=true; h.hp=h.maxhp; h.mp=h.maxmp; });
+    gold=Math.floor(gold/2);
+    loadMap('lorasia',4,8);
+    state=STATE.MAP;
+    say('おお… しんでしまうとは なさけない。\nもういちど ゆくがよい。');
+  }
+}
+function drawGameOver(){
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,VW,VH);
+  drawTextC('ぜんめつ',VW/2,170,'#ff4444',40);
+  if(goTimer>40)drawTextC('Zキーで つづける',VW/2,260,'#fff',16);
+}
+function updateEnding(){
+  endTimer++;
+  if(endTimer>120 && consume('z')){ state=STATE.TITLE; title.slotsLoaded=false; logoT=0; }
+}
+function drawEnding(){
+  ctx.fillStyle='#001a40'; ctx.fillRect(0,0,VW,VH);
+  for(let i=0;i<30;i++){ ctx.fillStyle='rgba(255,255,200,'+(0.3+0.4*Math.sin(animClock/200+i))+')'; ctx.fillRect((i*113)%VW,(i*71+animClock*0.03)%VH,2,2); }
+  drawTextC('シドーを たおした！',VW/2,80,'#ffd700',26);
+  const lines=[
+    'はかいしん シドーは ほろびさり',
+    'せかいに ひかりが もどった。',
+    '',
+    'ローレシア・サマルトリア・',
+    'ムーンブルクの 三人は',
+    'えいゆうとして たたえられた。',
+    '',
+    'そして あらたな でんせつが はじまる…',
+  ];
+  let y=150;
+  for(const l of lines){ drawTextC(l,VW/2,y,'#fff',16); y+=26; }
+  drawTextC('  ～ おわり ～  ',VW/2,y+10,'#ffaa00',20);
+  if(endTimer>120)drawTextC('Zキーで タイトルへ',VW/2,420,'#88aaff',14);
+}
+
+/* ============================================================
+   SAVE on menu (quick): press in menu? We'll add to main menu?
+   Actually add save via talking to King isn't enough — add to menu.
+   We'll auto-save reminder: pressing X+Z on world? Simpler: add 'セーブ'?
+   We'll auto-save whenever entering a town/castle.
+   ============================================================ */
+let lastMapForSave='';
+function autosaveCheck(){
+  if(curMap && curMap.indoor && !curMap.floor && curMapId!==lastMapForSave){
+    lastMapForSave=curMapId;
+    if(party.length) saveGame(currentSlot);
+  }
+}
+
+/* ============================================================
+   MAIN LOOP
+   ============================================================ */
+let last=0;
+function loop(ts){
+  const dt=ts-last; last=ts;
+  animClock+=dt;
+  switch(state){
+    case STATE.TITLE: updateTitle(); drawTitle(); break;
+    case STATE.MAP: updateMap(dt); autosaveCheck(); drawMap(); break;
+    case STATE.MENU: updateMenu(); drawMenu(); break;
+    case STATE.DIALOG: updateDialog(); drawDialog(); break;
+    case STATE.SHOP:
+      if(shop&&shop.mode==='equip'){ updateShopEquip(); } else updateShop();
+      drawShop(); break;
+    case STATE.BATTLE: updateBattle(); drawBattle(); break;
+    case STATE.GAMEOVER: updateGameOver(); drawGameOver(); break;
+    case STATE.ENDING: updateEnding(); drawEnding(); break;
+  }
+  clearPressed();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
