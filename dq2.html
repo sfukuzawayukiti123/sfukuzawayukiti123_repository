@@ -345,8 +345,8 @@ const MOONPETA = parseMap([
 "# I  N   S #",
 "#          #",
 "# S  TT  N #",
-"#    TT     ",
-"#       $   ",
+"#    TT    #",
+"#       $  #",
 "# N      I #",
 "#   ####   #",
 "#   #  #   #",
@@ -359,8 +359,8 @@ const LUPGANA = parseMap([
 "#S  N    I #",
 "#         S#",
 "# N   ~~~~ #",
-"#     ~~~~  ",
-"#  $  ~~~~  ",
+"#     ~~~~ #",
+"#  $  ~~~~ #",
 "# N   ~~~~ #",
 "#    N   I #",
 "#   ####   #",
@@ -373,7 +373,7 @@ const BERANOOL = parseMap([
 "# I  N  S#",
 "#        #",
 "# N  $   #",
-"#       S ",
+"#       S#",
 "#  TT    #",
 "# N   N  #",
 "#  ####  #",
@@ -386,7 +386,7 @@ const ZAHAN = parseMap([
 "##########",
 "#S   N  I#",
 "#        #",
-"#  N  N   ",
+"#  N  N  #",
 "#        #",
 "#   $    #",
 "# I    S #",
@@ -693,7 +693,8 @@ function loadMap(id,tx,ty){
 function tileAt(mx,my){
   if(!curMap)return T.WALL;
   if(my<0||my>=curMap.h||mx<0||mx>=curMap.w)return T.WALL;
-  return curMap.grid[my][mx];
+  const t=curMap.grid[my][mx];
+  return t!==undefined?t:T.WALL;
 }
 function isBlocked(mx,my){
   const t=tileAt(mx,my);
@@ -1801,7 +1802,7 @@ function loop(ts){
     case STATE.TITLE: updateTitle(); drawTitle(); break;
     case STATE.MAP: updateMap(dt); autosaveCheck(); drawMap(); break;
     case STATE.MENU: updateMenu(); drawMenu(); break;
-    case STATE.DIALOG: updateDialog(); drawDialog(); break;
+    case STATE.DIALOG: updateDialog(); if(dialog) drawDialog(); else drawMap(); break;
     case STATE.SHOP:
       if(shop&&shop.mode==='equip'){ updateShopEquip(); } else updateShop();
       drawShop(); break;
