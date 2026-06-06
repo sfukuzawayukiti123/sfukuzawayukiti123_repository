@@ -26,7 +26,7 @@
 </head>
 <body>
 <div id="wrap">
-  <canvas id="game" width="512" height="448"></canvas>
+  <canvas id="game" width="512" height="448" tabindex="0"></canvas>
   <div id="pad">
     <div class="dpad">
       <button class="blank"></button>
@@ -54,6 +54,10 @@
 const cv = document.getElementById('game');
 const ctx = cv.getContext('2d');
 ctx.imageSmoothingEnabled = false;
+// iframeやクリック前でもキーボード入力を受け取れるよう自動フォーカス
+cv.focus();
+cv.addEventListener('click', () => cv.focus());
+document.addEventListener('click', () => cv.focus());
 const TILE = 32;            // rendered tile size
 const VW = cv.width, VH = cv.height;
 const COLS = VW / TILE, ROWS = VH / TILE; // 16 x 14 visible
@@ -65,19 +69,22 @@ function setKey(k,v){
   if(v && !keys[k]) pressed[k]=true;
   keys[k]=v;
 }
-window.addEventListener('keydown',e=>{
-  const map={ArrowUp:'ArrowUp',ArrowDown:'ArrowDown',ArrowLeft:'ArrowLeft',ArrowRight:'ArrowRight'};
+function handleKeyDown(e){
   let k=e.key;
   if(k===' ')k='z';
   if(k==='Enter')k='z';
   if(k==='Escape')k='x';
   k=k.length===1?k.toLowerCase():k;
   if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','z','x'].includes(k)){ e.preventDefault(); setKey(k,true); }
-});
-window.addEventListener('keyup',e=>{
+}
+function handleKeyUp(e){
   let k=e.key; if(k===' ')k='z'; if(k==='Enter')k='z'; if(k==='Escape')k='x';
   k=k.length===1?k.toLowerCase():k; setKey(k,false);
-});
+}
+window.addEventListener('keydown', handleKeyDown);
+window.addEventListener('keyup', handleKeyUp);
+cv.addEventListener('keydown', handleKeyDown);
+cv.addEventListener('keyup', handleKeyUp);
 document.querySelectorAll('#pad button[data-k]').forEach(b=>{
   const k=b.dataset.k;
   const dn=e=>{e.preventDefault();setKey(k,true);};
@@ -1643,7 +1650,7 @@ function updateTitle(){
   if(consume('z')){
     if(title.sel<3){
       if(title.slots[title.sel]){ loadGame(title.sel); }
-      else { freshGame(); saveGame(title.sel); currentSlot=title.sel; loadMap('lorasia',4,8); state=STATE.MAP; say(['ぼうけんの しょを つくった。','Xメニューから いつでも セーブできる。','まず 王さまに はなしかけよう。']); }
+      else { freshGame(); saveGame(title.sel); currentSlot=title.sel; loadMap('lorasia',4,8); state=STATE.MAP; }
       currentSlot=title.sel;
     } else {
       // erase mode
